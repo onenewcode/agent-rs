@@ -1,0 +1,135 @@
+prefix_rule(
+    pattern = ["rg"],
+    decision = "allow",
+    justification = "Repository search is allowed.",
+    match = ["rg --files", "rg -n main src"],
+    not_match = ["grep -R main src"],
+)
+
+prefix_rule(
+    pattern = ["git", "status"],
+    decision = "allow",
+    justification = "Inspecting git status is allowed.",
+    match = ["git status --short"],
+    not_match = ["git diff --cached"],
+)
+
+prefix_rule(
+    pattern = ["git", "diff"],
+    decision = "allow",
+    justification = "Inspecting diffs is allowed.",
+    match = ["git diff", "git diff --cached"],
+    not_match = ["git show HEAD~1"],
+)
+
+prefix_rule(
+    pattern = ["cargo", "check"],
+    decision = "allow",
+    justification = "Low-risk validation is allowed.",
+    match = ["cargo check"],
+    not_match = ["cargo clippy"],
+)
+
+prefix_rule(
+    pattern = ["cargo", "test"],
+    decision = "allow",
+    justification = "Tests are allowed.",
+    match = ["cargo test", "cargo test --workspace"],
+    not_match = ["cargo nextest run"],
+)
+
+prefix_rule(
+    pattern = ["cargo", "clippy"],
+    decision = "allow",
+    justification = "Clippy is allowed for validation.",
+    match = ["cargo clippy --workspace --all-targets --all-features"],
+    not_match = ["cargo clean"],
+)
+
+prefix_rule(
+    pattern = ["cargo", "fmt"],
+    decision = "prompt",
+    justification = "Formatting writes files. Confirm before running directly.",
+    match = ["cargo fmt", "cargo fmt --all"],
+    not_match = ["cargo check"],
+)
+
+prefix_rule(
+    pattern = ["git", "add"],
+    decision = "allow",
+    justification = "Staging files is allowed for post-validation commit preparation.",
+    match = ["git add src/main.rs", "git add ."],
+    not_match = ["git status"],
+)
+
+prefix_rule(
+    pattern = ["git", "commit"],
+    decision = "prompt",
+    justification = "Commits require confirmation and must respect local hooks.",
+    match = ["git commit -m update", "git commit --amend"],
+    not_match = ["git status"],
+)
+
+prefix_rule(
+    pattern = ["git", "push"],
+    decision = "prompt",
+    justification = "Pushing changes requires confirmation.",
+    match = ["git push", "git push origin main"],
+    not_match = ["git pull"],
+)
+
+prefix_rule(
+    pattern = [["curl", "wget"]],
+    decision = "prompt",
+    justification = "Networked shell fetches require confirmation.",
+    match = ["curl -L https://example.com", "wget https://example.com/file"],
+    not_match = ["git status"],
+)
+
+prefix_rule(
+    pattern = [["cargo", "uv", "brew", "npm", "pnpm"], ["add", "install"]],
+    decision = "prompt",
+    justification = "Dependency changes require confirmation.",
+    match = ["cargo add anyhow", "brew install jq", "npm install typescript"],
+    not_match = ["cargo check"],
+)
+
+prefix_rule(
+    pattern = ["git", "reset", "--hard"],
+    decision = "forbidden",
+    justification = "Hard reset is forbidden. Inspect diffs and ask the user before cleanup.",
+    match = ["git reset --hard", "git reset --hard HEAD"],
+    not_match = ["git reset HEAD src/main.rs"],
+)
+
+prefix_rule(
+    pattern = ["git", "clean", "-fd"],
+    decision = "forbidden",
+    justification = "Destructive git clean is forbidden.",
+    match = ["git clean -fd"],
+    not_match = ["git clean -n"],
+)
+
+prefix_rule(
+    pattern = ["git", "clean", "-fdx"],
+    decision = "forbidden",
+    justification = "Destructive git clean is forbidden.",
+    match = ["git clean -fdx"],
+    not_match = ["git clean -n"],
+)
+
+prefix_rule(
+    pattern = ["rm", "-rf"],
+    decision = "forbidden",
+    justification = "Recursive deletion is forbidden unless explicitly approved outside normal workflow.",
+    match = ["rm -rf target", "rm -rf ."],
+    not_match = ["rm -f Cargo.lock"],
+)
+
+prefix_rule(
+    pattern = [["bash", "sh", "zsh"], ["-lc", "-c"]],
+    decision = "prompt",
+    justification = "Shell wrapper commands can hide multiple actions and require confirmation.",
+    match = ["bash -lc 'git status && cargo check'", "zsh -c 'git diff'"],
+    not_match = ["git status"],
+)

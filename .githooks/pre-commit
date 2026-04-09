@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+staged_files=()
+while IFS= read -r line; do
+  staged_files+=("$line")
+done < <(git diff --cached --name-only --diff-filter=ACMR)
+
+rust_related=()
+for file in "${staged_files[@]}"; do
+  case "$file" in
+    *.rs|Cargo.toml|Cargo.lock)
+      rust_related+=("$file")
+      ;;
+  esac
+done
+
+if [ "${#rust_related[@]}" -eq 0 ]; then
+  exit 0
+fi
+
+unstaged_rust=()
+while IFS= read -r line; do
+  unstaged_rust+=("$line")
+done < <(git diff --name-only -- '*.rs' 'Cargo.toml' 'Cargo.lock')
+if [ "${#unstaged_rust[@]}" -gt 0 ]; then
+  printf '%s\n' "pre-commit: unstaged Rust-related changes detected. Stage or stash them before commit."
+  printf '%s\n' "${unstaged_rust[@]}"
+  exit 1
+fi
+
+printf '%s\n' "pre-commit: running cargo fmt"
+cargo fmt
+
+post_fmt_unstaged=()
+while IFS= read -r line; do
+  post_fmt_unstaged+=("$line")
+done < <(git diff --name-only -- '*.rs' 'Cargo.toml' 'Cargo.lock')
+if [ "${#post_fmt_unstaged[@]}" -gt 0 ]; then
+  declare -A staged_lookup=()
+  for file in "${rust_related[@]}"; do
+    staged_lookup["$file"]=1
+  done
+
+  for file in "${post_fmt_unstaged[@]}"; do
+    if [ -z "${staged_lookup[$file]:-}" ]; then
+      printf '%s\n' "pre-commit: cargo fmt changed a Rust-related file that was not staged:"
+      printf '%s\n' "$file"
+      printf '%s\n' "Review the diff and stage intentionally before committing again."
+      exit 1
+    fi
+  done
+
+  git add -- "${post_fmt_unstaged[@]}"
+fi
+
+printf '%s\n' "pre-commit: running cargo clippy --workspace --all-targets --all-features"
+cargo clippy --workspace --all-targets --all-features
