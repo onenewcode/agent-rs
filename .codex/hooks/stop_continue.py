@@ -63,20 +63,18 @@ def main() -> int:
             return 0
 
         if review_status == "approved":
-            final_commit_sha = review.get("Final Commit SHA", "")
-            if not final_commit_sha:
-                json.dump(
-                    {
-                        "continue": False,
-                        "stopReason": "Approved work should be committed or explicitly deferred.",
-                        "systemMessage": (
-                            f"Active ExecPlan {active_plan} is approved for commit but has no "
-                            "Final Commit SHA. Run the commit or change the review state before ending the turn."
-                        ),
-                    },
-                    sys.stdout,
-                )
-                return 0
+            json.dump(
+                {
+                    "continue": False,
+                    "stopReason": "Approved work should be committed or explicitly deferred.",
+                    "systemMessage": (
+                        f"Active ExecPlan {active_plan} is approved for commit. "
+                        "Run the commit or change the review state before ending the turn."
+                    ),
+                },
+                sys.stdout,
+            )
+            return 0
 
     json.dump({"continue": True}, sys.stdout)
     return 0

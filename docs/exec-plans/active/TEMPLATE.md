@@ -32,7 +32,6 @@ Describe the intended outcome in one short paragraph.
 - Files Intended For Commit:
 - Proposed Commit Message:
 - Human Approval:
-- Final Commit SHA:
 
 ## Progress Log
 

@@ -17,8 +17,8 @@ Small read-only investigations and tiny isolated edits can stay plan-free.
 ## File Layout
 
 - Active plans live in `docs/exec-plans/active/`
-- Completed plans are moved to `docs/exec-plans/completed/`
 - `docs/exec-plans/active/TEMPLATE.md` is the starting point
+- Only plans with working-tree changes are treated as active by hooks
 
 ## Plan Requirements
 
@@ -41,4 +41,4 @@ Use the template fields in `docs/exec-plans/active/TEMPLATE.md` rather than inve
 2. Reference the active plan path in implementation messages.
 3. Update progress and validation notes during the task.
 4. If the task produced repo changes, fill in the template's Review Gate fields before closing the task.
-5. Move the file to `completed/` when the work is done and any approved commit has been created, or leave it in `active/` with explicit next steps.
+5. Finished plans may remain in `active/` as immutable history. Hooks only treat changed plan files as active work.

@@ -37,4 +37,5 @@ This is the runtime policy for this repository.
 - Technical ability is not permission.
 - For non-trivial work, an active ExecPlan is required before coding starts.
 - For tasks with repo changes, the active ExecPlan must record one of: `pending_human_review`, `approved`, or `deferred`.
+- Hooks only treat changed ExecPlan files in the working tree as active work.
 - Harness changes must update `docs/codex/CHANGELOG.md`.
