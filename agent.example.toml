@@ -1,0 +1,16 @@
+[llm]
+provider = "openrouter"
+model = "openai/gpt-4.1-mini"
+api_key = "replace-with-openrouter-api-key"
+
+[search]
+provider = "tavily"
+api_key = "replace-with-tavily-api-key"
+max_results = 5
+
+[limits]
+document_chars = 12000
+source_chars = 4000
+
+[fetch]
+user_agent = "agent-rs-docx-agent/0.1"
