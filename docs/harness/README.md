@@ -11,7 +11,7 @@ Runtime assets:
 
 - `.codex/rules/default.rules`
 - `.codex/hooks.json`
-- `.codex/hooks/`
+- `hooks/`
 - `.githooks/pre-commit`
 
 Limitations:

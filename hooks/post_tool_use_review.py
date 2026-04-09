@@ -6,11 +6,15 @@ import sys
 
 def main() -> int:
     payload = json.load(sys.stdin)
+    tool_input = payload.get("tool_input", {})
     command = (
-        payload.get("tool_input", {}).get("command")
+        tool_input.get("command")
         or payload.get("tool_input.command")
         or ""
     )
+    if not isinstance(command, str):
+        command = str(command)
+
     response = payload.get("tool_response")
     response_text = response if isinstance(response, str) else json.dumps(response)
 
@@ -31,6 +35,7 @@ def main() -> int:
     if message is not None:
         json.dump(
             {
+                "systemMessage": message,
                 "hookSpecificOutput": {
                     "hookEventName": "PostToolUse",
                     "additionalContext": message,
@@ -38,7 +43,9 @@ def main() -> int:
             },
             sys.stdout,
         )
+        return 0
 
+    json.dump({}, sys.stdout)
     return 0
 
 

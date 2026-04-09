@@ -18,17 +18,23 @@ DENY_PATTERNS = (
 
 def main() -> int:
     payload = json.load(sys.stdin)
-    repo_root = Path(payload.get("cwd") or ".")
+    repo_root = Path(payload.get("cwd") or payload.get("context", {}).get("cwd") or ".")
+    
+    tool_input = payload.get("tool_input", {})
     command = (
-        payload.get("tool_input", {}).get("command")
+        tool_input.get("command")
         or payload.get("tool_input.command")
         or ""
     )
+    if not isinstance(command, str):
+        command = str(command)
 
     for pattern, reason in DENY_PATTERNS:
         if re.search(pattern, command):
             json.dump(
                 {
+                    "decision": "deny",
+                    "reason": reason,
                     "hookSpecificOutput": {
                         "hookEventName": "PreToolUse",
                         "permissionDecision": "deny",
@@ -46,6 +52,8 @@ def main() -> int:
             reason = "git commit requires an active ExecPlan with recorded human approval."
             json.dump(
                 {
+                    "decision": "deny",
+                    "reason": reason,
                     "hookSpecificOutput": {
                         "hookEventName": "PreToolUse",
                         "permissionDecision": "deny",
@@ -66,6 +74,8 @@ def main() -> int:
             )
             json.dump(
                 {
+                    "decision": "deny",
+                    "reason": reason,
                     "hookSpecificOutput": {
                         "hookEventName": "PreToolUse",
                         "permissionDecision": "deny",
@@ -84,6 +94,8 @@ def main() -> int:
             )
             json.dump(
                 {
+                    "decision": "deny",
+                    "reason": reason,
                     "hookSpecificOutput": {
                         "hookEventName": "PreToolUse",
                         "permissionDecision": "deny",
@@ -97,6 +109,7 @@ def main() -> int:
 
         json.dump(
             {
+                "decision": "allow",
                 "systemMessage": (
                     "Git commits must respect .githooks/pre-commit and should only happen "
                     "after validation, human review approval, and ExecPlan updates."
@@ -104,7 +117,9 @@ def main() -> int:
             },
             sys.stdout,
         )
+        return 0
 
+    json.dump({"decision": "allow"}, sys.stdout)
     return 0
 
 
