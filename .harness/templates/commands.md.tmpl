@@ -6,10 +6,10 @@ Readable copy of the shared shell-command policy used by the Harness hook.
 
 ## Matching Rules
 
-- Command rules use argv-prefix matching.
-- Blocked prefixes win over allowed prefixes.
-- Commands outside the allow list are rejected.
-- Codex hook enforcement currently applies to `Bash` tool events.
+- Commands are split by `&&`, `||`, `;`, and `|`, then evaluated segment-by-segment.
+- The strictest matched decision wins (`deny` > `warn` > `allow`).
+- Blocked prefixes always deny.
+- Commands outside documented read-only prefixes are handled by `unknown_command = {unknown_mode}`.
 
 ## Allowed Command Prefixes
 

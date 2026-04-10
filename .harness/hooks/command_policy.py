@@ -4,6 +4,46 @@ import re
 from typing import Any
 
 
+READ_PREFIXES: tuple[str, ...] = (
+    "git status",
+    "git diff",
+    "git ls-files",
+    "ls",
+    "cat",
+    "rg",
+    "pwd",
+    "which",
+    "echo",
+    "head",
+    "tail",
+    "wc",
+)
+
+WRITE_PREFIXES: tuple[str, ...] = (
+    "git add",
+    "git commit",
+    "git mv",
+    "git rm",
+    "git apply",
+    "touch",
+    "mkdir",
+    "cp",
+    "mv",
+    "tee",
+    "truncate",
+    "chmod",
+    "chown",
+    "ln",
+)
+
+HIGH_RISK_PREFIXES: tuple[str, ...] = (
+    "rm",
+    "git reset",
+    "git checkout",
+    "git clean",
+)
+
+
 def extract_command_from_raw(raw: str) -> str:
     if not raw:
         return ""
@@ -44,6 +84,76 @@ def scan_for_command(payload: dict[str, Any]) -> str:
     return ""
 
 
+def split_command_segments(command: str) -> list[str]:
+    """
+    Split shell text into independently evaluated segments.
+    Separators: &&, ||, ;, | (outside quotes).
+    """
+    if not command.strip():
+        return []
+
+    out: list[str] = []
+    token: list[str] = []
+    quote: str | None = None
+    escape = False
+    index = 0
+    text = command
+
+    def flush() -> None:
+        segment = "".join(token).strip()
+        token.clear()
+        if segment:
+            out.append(segment)
+
+    while index < len(text):
+        ch = text[index]
+        nxt = text[index + 1] if index + 1 < len(text) else ""
+
+        if escape:
+            token.append(ch)
+            escape = False
+            index += 1
+            continue
+
+        if ch == "\\" and quote != "'":
+            token.append(ch)
+            escape = True
+            index += 1
+            continue
+
+        if quote:
+            token.append(ch)
+            if ch == quote:
+                quote = None
+            index += 1
+            continue
+
+        if ch in {"'", '"'}:
+            quote = ch
+            token.append(ch)
+            index += 1
+            continue
+
+        if ch == "&" and nxt == "&":
+            flush()
+            index += 2
+            continue
+        if ch == "|" and nxt == "|":
+            flush()
+            index += 2
+            continue
+        if ch in {";", "|", "\n"}:
+            flush()
+            index += 1
+            continue
+
+        token.append(ch)
+        index += 1
+
+    flush()
+    return out
+
+
 def starts_with_prefix(command: str, prefixes: list[str]) -> str | None:
     normalized = command.strip().lower()
     for prefix in prefixes:
@@ -75,46 +185,13 @@ def classify_command(command: str) -> str:
         return "unknown"
 
     low = normalized.lower()
-    if any(
-        low == prefix or low.startswith(prefix + " ")
-        for prefix in ("rm", "git reset", "git checkout", "git clean")
-    ):
+    if any(low == prefix or low.startswith(prefix + " ") for prefix in HIGH_RISK_PREFIXES):
         return "high_risk"
 
-    read_prefixes = (
-        "git status",
-        "git diff",
-        "git ls-files",
-        "ls",
-        "cat",
-        "rg",
-        "pwd",
-        "which",
-        "echo",
-        "head",
-        "tail",
-        "wc",
-    )
-    if any(low == prefix or low.startswith(prefix + " ") for prefix in read_prefixes):
+    if any(low == prefix or low.startswith(prefix + " ") for prefix in READ_PREFIXES):
         return "read"
 
-    write_prefixes = (
-        "git add",
-        "git commit",
-        "git mv",
-        "git rm",
-        "git apply",
-        "touch",
-        "mkdir",
-        "cp",
-        "mv",
-        "tee",
-        "truncate",
-        "chmod",
-        "chown",
-        "ln",
-    )
-    if any(low == prefix or low.startswith(prefix + " ") for prefix in write_prefixes):
+    if any(low == prefix or low.startswith(prefix + " ") for prefix in WRITE_PREFIXES):
         return "write"
 
     if any(token in normalized for token in (">", ">>")):

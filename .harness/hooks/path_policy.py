@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import shlex
+from pathlib import PurePosixPath
 
 
 def matches_blocked_path(command: str, blocked_globs: list[str]) -> tuple[bool, str]:
@@ -29,6 +30,11 @@ def matches_blocked_path(command: str, blocked_globs: list[str]) -> tuple[bool, 
         if not path_text:
             continue
         normalized = path_text.replace("\\", "/")
+
+        parts = PurePosixPath(normalized).parts
+        if ".." in parts:
+            return True, f"path_traversal:{path_text}"
+
         for pattern in blocked_globs:
             blocked = pattern.replace("\\", "/")
             if blocked == ".git/**":
