@@ -1,0 +1,36 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "HARNESS_PLATFORM=codex /usr/bin/env python3 \"$(git rev-parse --show-toplevel)/.harness/hooks/post_tool.py\"",
+            "type": "command"
+          }
+        ],
+        "matcher": "Bash"
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "HARNESS_PLATFORM=codex /usr/bin/env python3 \"$(git rev-parse --show-toplevel)/.harness/hooks/pre_tool.py\"",
+            "type": "command"
+          }
+        ],
+        "matcher": "Bash"
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "command": "HARNESS_PLATFORM=codex /usr/bin/env python3 \"$(git rev-parse --show-toplevel)/.harness/hooks/stop.py\"",
+            "type": "command"
+          }
+        ]
+      }
+    ]
+  }
+}

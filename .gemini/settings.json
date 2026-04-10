@@ -1,0 +1,36 @@
+{
+  "hooks": {
+    "AfterAgent": [
+      {
+        "hooks": [
+          {
+            "command": "HARNESS_PLATFORM=gemini python3 \"$GEMINI_PROJECT_DIR/.harness/hooks/stop.py\"",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "AfterTool": [
+      {
+        "hooks": [
+          {
+            "command": "HARNESS_PLATFORM=gemini python3 \"$GEMINI_PROJECT_DIR/.harness/hooks/post_tool.py\"",
+            "type": "command"
+          }
+        ],
+        "matcher": "run_shell_command|write_file|replace"
+      }
+    ],
+    "BeforeTool": [
+      {
+        "hooks": [
+          {
+            "command": "HARNESS_PLATFORM=gemini python3 \"$GEMINI_PROJECT_DIR/.harness/hooks/pre_tool.py\"",
+            "type": "command"
+          }
+        ],
+        "matcher": "run_shell_command"
+      }
+    ]
+  }
+}
