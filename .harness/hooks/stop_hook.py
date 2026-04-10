@@ -1,32 +1,36 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-import os
 import subprocess
 import sys
 from pathlib import Path
 
 
 DEFAULT_EVENT = "Stop"
-IGNORED_DIRS = {".git", "target", "node_modules", ".venv", "venv"}
-
-
-def has_rust_files(root: Path) -> bool:
-    for current_root, dirnames, filenames in os.walk(root):
-        dirnames[:] = [name for name in dirnames if name not in IGNORED_DIRS]
-        if any(name.endswith(".rs") for name in filenames):
-            return True
-    return False
-
 
 def run_command(command: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        command,
-        cwd=cwd,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
+    try:
+        return subprocess.run(
+            command,
+            cwd=cwd,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=127,
+            stdout="",
+            stderr=f"missing_executable:{command[0]}",
+        )
+    except OSError as exc:
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=127,
+            stdout="",
+            stderr=f"os_error:{exc}",
+        )
 
 
 def _print_subprocess_error(result: subprocess.CompletedProcess[str], code: str) -> None:
@@ -37,9 +41,37 @@ def _print_subprocess_error(result: subprocess.CompletedProcess[str], code: str)
         print(f"DENY {code}")
 
 
+def has_changed_rust_files(cwd: Path) -> bool:
+    inside_repo = run_command(["git", "rev-parse", "--is-inside-work-tree"], cwd)
+    if inside_repo.returncode != 0:
+        return False
+
+    status = run_command(
+        ["git", "status", "--porcelain", "--untracked-files=all", "--", "*.rs"],
+        cwd,
+    )
+    if status.returncode != 0:
+        return False
+
+    for line in status.stdout.splitlines():
+        entry = line.strip()
+        if not entry:
+            continue
+        if len(entry) > 3:
+            path_part = entry[3:]
+        else:
+            path_part = entry
+        if " -> " in path_part:
+            path_part = path_part.split(" -> ", 1)[1]
+        candidate = path_part.strip().strip('"')
+        if candidate.endswith(".rs"):
+            return True
+    return False
+
+
 def run_stop() -> int:
     cwd = Path.cwd()
-    if not has_rust_files(cwd):
+    if not has_changed_rust_files(cwd):
         return 0
 
     manifest = cwd / "Cargo.toml"

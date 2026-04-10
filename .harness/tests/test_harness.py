@@ -74,6 +74,7 @@ class HarnessTestCase(unittest.TestCase):
         for source, destination in copy_map.items():
             shutil.copy2(source, destination)
 
+        subprocess.run(["git", "init"], cwd=repo_root, check=True, capture_output=True, text=True)
         return repo_root
 
     def write_policy(self, repo_root: Path, text: str) -> None:
