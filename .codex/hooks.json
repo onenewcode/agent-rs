@@ -28,7 +28,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 .harness/hooks/policy_hook.py Stop codex"
+            "command": "python3 .harness/hooks/stop_hook.py Stop codex"
           }
         ]
       }

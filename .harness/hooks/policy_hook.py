@@ -6,6 +6,7 @@ from typing import Any
 
 from command_policy import (
     classify_command,
+    contains_prefix_in_shell_context,
     raw_contains_prefix,
     scan_for_command,
     split_command_segments,
@@ -160,6 +161,8 @@ def decide_event(event: str, payload: dict[str, Any], policy: dict[str, Any]) ->
         segment_classifications.append(classification)
 
         blocked_match = starts_with_prefix(segment, blocked_prefixes)
+        if not blocked_match:
+            blocked_match = contains_prefix_in_shell_context(segment, blocked_prefixes)
         if blocked_match:
             mark(
                 "deny",
@@ -178,7 +181,7 @@ def decide_event(event: str, payload: dict[str, Any], policy: dict[str, Any]) ->
             else:
                 mark("deny", "unknown_command", "unknown_command:deny")
 
-        if classification in {"write", "high_risk"}:
+        if classification != "read":
             blocked, detail = matches_blocked_path(segment, blocked_paths)
             if blocked:
                 mark(
@@ -230,7 +233,7 @@ def run_event(event: str, platform: str = DEFAULT_PLATFORM) -> int:
 def main() -> int:
     event = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_EVENT
     platform = sys.argv[2] if len(sys.argv) > 2 else DEFAULT_PLATFORM
-    if event not in {"PreToolUse", "PostToolUse", "Stop"}:
+    if event not in {"PreToolUse", "PostToolUse"}:
         print(f"Unsupported hook event: {event or 'Unknown'}", file=sys.stderr)
         return 1
     return run_event(event, platform)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import shlex
 from typing import Any
 
 
@@ -114,14 +115,146 @@ def split_command_segments(command: str) -> list[str]:
     return out
 
 
+_ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
+
+
+def _is_env_assignment(token: str) -> bool:
+    return bool(_ENV_ASSIGNMENT_RE.match(token))
+
+
+def _tokenize(command: str) -> list[str]:
+    try:
+        return shlex.split(command)
+    except ValueError:
+        return command.split()
+
+
+def _normalize_shell_token(token: str) -> str:
+    value = token.strip()
+    if not value:
+        return ""
+
+    while True:
+        changed = False
+        if value.startswith("$("):
+            value = value[2:]
+            changed = True
+        if value.startswith("`"):
+            value = value[1:]
+            changed = True
+        if value.startswith("("):
+            value = value[1:]
+            changed = True
+        if value.startswith("{"):
+            value = value[1:]
+            changed = True
+        if value.endswith(")"):
+            value = value[:-1]
+            changed = True
+        if value.endswith("`"):
+            value = value[:-1]
+            changed = True
+        if value.endswith(";"):
+            value = value[:-1]
+            changed = True
+        if not changed:
+            break
+    return value.strip()
+
+
+def _command_starts(tokens: list[str]) -> list[int]:
+    starts: list[int] = []
+    if not tokens:
+        return starts
+
+    idx = 0
+    while idx < len(tokens):
+        normalized = _normalize_shell_token(tokens[idx])
+        if not normalized or _is_env_assignment(normalized):
+            idx += 1
+            continue
+        starts.append(idx)
+        break
+
+    for i, token in enumerate(tokens):
+        stripped = token.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("$(") or stripped.startswith("`"):
+            starts.append(i)
+
+    deduped: list[int] = []
+    seen: set[int] = set()
+    for start in starts:
+        if start in seen:
+            continue
+        seen.add(start)
+        deduped.append(start)
+    return deduped
+
+
+def _matches_prefix_from(tokens: list[str], start: int, prefix: str) -> bool:
+    prefix_tokens = [part for part in prefix.lower().split() if part]
+    if not prefix_tokens:
+        return False
+
+    idx = start
+    while idx < len(tokens):
+        normalized = _normalize_shell_token(tokens[idx]).lower()
+        if not normalized:
+            idx += 1
+            continue
+        if _is_env_assignment(normalized):
+            idx += 1
+            continue
+        break
+
+    for expected in prefix_tokens:
+        while idx < len(tokens):
+            normalized = _normalize_shell_token(tokens[idx]).lower()
+            if normalized:
+                break
+            idx += 1
+        if idx >= len(tokens):
+            return False
+        if normalized != expected:
+            return False
+        idx += 1
+    return True
+
+
 def starts_with_prefix(command: str, prefixes: list[str]) -> str | None:
-    normalized = command.strip().lower()
+    tokens = _tokenize(command)
+    if not tokens:
+        return None
+    starts = _command_starts(tokens)
+    if not starts:
+        return None
+    first_start = starts[0]
+
     for prefix in prefixes:
-        candidate = prefix.strip().lower()
+        candidate = prefix.strip()
         if not candidate:
             continue
-        if normalized == candidate or normalized.startswith(candidate + " "):
+        if _matches_prefix_from(tokens, first_start, candidate):
             return prefix
+    return None
+
+
+def contains_prefix_in_shell_context(command: str, prefixes: list[str]) -> str | None:
+    tokens = _tokenize(command)
+    if not tokens:
+        return None
+    starts = _command_starts(tokens)
+    if not starts:
+        return None
+    for start in starts:
+        for prefix in prefixes:
+            candidate = prefix.strip()
+            if not candidate:
+                continue
+            if _matches_prefix_from(tokens, start, candidate):
+                return prefix
     return None
 
 
@@ -146,32 +279,34 @@ def classify_command(
     """
     Return one of: read | write | high_risk | unknown
     """
-    normalized = command.strip()
-    if not normalized:
+    tokens = _tokenize(command)
+    starts = _command_starts(tokens)
+    if not starts:
         return "unknown"
+    first_start = starts[0]
 
-    low = normalized.lower()
     if any(
-        low == prefix.lower() or low.startswith(prefix.lower() + " ")
+        _matches_prefix_from(tokens, first_start, prefix.strip())
         for prefix in high_risk_prefixes
         if prefix.strip()
     ):
         return "high_risk"
 
     if any(
-        low == prefix.lower() or low.startswith(prefix.lower() + " ")
+        _matches_prefix_from(tokens, first_start, prefix.strip())
         for prefix in allowed_prefixes
         if prefix.strip()
     ):
         return "read"
 
     if any(
-        low == prefix.lower() or low.startswith(prefix.lower() + " ")
+        _matches_prefix_from(tokens, first_start, prefix.strip())
         for prefix in write_prefixes
         if prefix.strip()
     ):
         return "write"
 
+    normalized = command.strip()
     if any(token in normalized for token in (">", ">>")):
         return "write"
 

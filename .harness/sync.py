@@ -19,6 +19,7 @@ TEMPLATES_DIR = ROOT / ".harness" / "templates"
 INSTRUCTION_TMPL_PATH = TEMPLATES_DIR / "instruction.md.tmpl"
 COMMANDS_TMPL_PATH = TEMPLATES_DIR / "commands.md.tmpl"
 POLICY_HOOK_PATH = ROOT / ".harness" / "hooks" / "policy_hook.py"
+STOP_HOOK_PATH = ROOT / ".harness" / "hooks" / "stop_hook.py"
 
 
 def load_policy() -> dict:
@@ -201,6 +202,7 @@ def render_commands_rules(policy: dict) -> str:
 
 def render_codex_hooks() -> str:
     hook = POLICY_HOOK_PATH.relative_to(ROOT)
+    stop_hook = STOP_HOOK_PATH.relative_to(ROOT)
     payload = {
         "hooks": {
             "PreToolUse": [
@@ -231,7 +233,7 @@ def render_codex_hooks() -> str:
                     "hooks": [
                         {
                             "type": "command",
-                            "command": f"python3 {hook} Stop codex",
+                            "command": f"python3 {stop_hook} Stop codex",
                         }
                     ],
                 }

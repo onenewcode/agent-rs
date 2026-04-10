@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -56,6 +57,7 @@ class HarnessTestCase(unittest.TestCase):
             "path_policy.py",
             "policy_hook.py",
             "policy_io.py",
+            "stop_hook.py",
         )
         hooks_dir = repo_root / ".harness" / "hooks"
         hooks_dir.mkdir(parents=True, exist_ok=True)
@@ -94,6 +96,17 @@ class HarnessTestCase(unittest.TestCase):
             check=False,
         )
 
+    def run_stop(self, repo_root: Path, event: str = "Stop", env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, ".harness/hooks/stop_hook.py", event, "codex"],
+            cwd=repo_root,
+            input=json.dumps({}),
+            text=True,
+            capture_output=True,
+            check=False,
+            env=env,
+        )
+
     def test_sync_generates_all_outputs(self) -> None:
         repo_root = self.create_repo()
         result = subprocess.run(
@@ -112,6 +125,13 @@ class HarnessTestCase(unittest.TestCase):
             ".gemini/settings.json",
         ):
             self.assertTrue((repo_root / relative).exists(), relative)
+
+    def test_sync_generates_stop_hook_command(self) -> None:
+        repo_root = self.create_repo()
+        subprocess.run([sys.executable, ".harness/sync.py"], cwd=repo_root, check=True)
+        payload = json.loads((repo_root / ".codex" / "hooks.json").read_text(encoding="utf-8"))
+        command = payload["hooks"]["Stop"][0]["hooks"][0]["command"]
+        self.assertEqual(command, "python3 .harness/hooks/stop_hook.py Stop codex")
 
     def test_sync_is_idempotent(self) -> None:
         repo_root = self.create_repo()
@@ -146,9 +166,37 @@ class HarnessTestCase(unittest.TestCase):
         self.assertEqual(result.stdout, "")
         self.assertEqual(result.stderr, "")
 
+    def test_policy_hook_rejects_stop_event(self) -> None:
+        repo_root = self.create_repo()
+        payload = json.dumps({"tool_input": {"command": "git status"}})
+        result = subprocess.run(
+            [sys.executable, ".harness/hooks/policy_hook.py", "Stop", "codex"],
+            cwd=repo_root,
+            input=payload,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Unsupported hook event: Stop", result.stderr)
+
     def test_policy_hook_blocks_destructive_command_in_compound(self) -> None:
         repo_root = self.create_repo()
         result = self.run_event(repo_root, "PreToolUse", "git status && rm -rf target")
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stdout.strip(), "DENY blocked_prefix:rm")
+        self.assertEqual(result.stderr, "")
+
+    def test_policy_hook_blocks_destructive_command_with_env_assignment(self) -> None:
+        repo_root = self.create_repo()
+        result = self.run_event(repo_root, "PreToolUse", "FOO=1 rm -rf target")
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stdout.strip(), "DENY blocked_prefix:rm")
+        self.assertEqual(result.stderr, "")
+
+    def test_policy_hook_blocks_destructive_command_in_subshell(self) -> None:
+        repo_root = self.create_repo()
+        result = self.run_event(repo_root, "PreToolUse", "echo ok $(rm -rf target)")
         self.assertEqual(result.returncode, 2)
         self.assertEqual(result.stdout.strip(), "DENY blocked_prefix:rm")
         self.assertEqual(result.stderr, "")
@@ -158,6 +206,13 @@ class HarnessTestCase(unittest.TestCase):
         result = self.run_event(repo_root, "PostToolUse", "git add .git/config")
         self.assertEqual(result.returncode, 2)
         self.assertTrue(result.stdout.strip().startswith("DENY blocked_path:"))
+        self.assertEqual(result.stderr, "")
+
+    def test_policy_hook_blocks_unknown_command_writing_blocked_path(self) -> None:
+        repo_root = self.create_repo()
+        result = self.run_event(repo_root, "PreToolUse", 'sed -i "" -e s/a/b/ .git/config')
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stdout.strip(), "DENY blocked_path:path:.git/config")
         self.assertEqual(result.stderr, "")
 
     def test_policy_hook_allows_unknown_with_warning_and_single_line(self) -> None:
@@ -212,6 +267,122 @@ class HarnessTestCase(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertEqual(result.stdout.strip(), "DENY invalid_policy:write_prefixes")
         self.assertEqual(result.stderr, "")
+
+    def test_stop_hook_no_rust_files_is_noop(self) -> None:
+        repo_root = self.create_repo()
+        result = self.run_stop(repo_root)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(result.stderr, "")
+
+    def test_stop_hook_warns_when_rust_exists_without_manifest(self) -> None:
+        repo_root = self.create_repo()
+        src = repo_root / "src"
+        src.mkdir(parents=True, exist_ok=True)
+        (src / "main.rs").write_text("fn main() {}\n", encoding="utf-8")
+        result = self.run_stop(repo_root)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(result.stderr.strip(), "WARN stop_no_cargo_manifest")
+
+    def test_stop_hook_runs_fmt_then_clippy_fix(self) -> None:
+        repo_root = self.create_repo()
+        (repo_root / "Cargo.toml").write_text(
+            dedent(
+                """\
+                [package]
+                name = "demo"
+                version = "0.1.0"
+                edition = "2021"
+                """
+            ),
+            encoding="utf-8",
+        )
+        src = repo_root / "src"
+        src.mkdir(parents=True, exist_ok=True)
+        (src / "lib.rs").write_text("pub fn f()->i32{1}\n", encoding="utf-8")
+
+        fake_bin = repo_root / "fake-bin"
+        fake_bin.mkdir(parents=True, exist_ok=True)
+        log_path = repo_root / "cargo.log"
+        fake_cargo = fake_bin / "cargo"
+        fake_cargo.write_text(
+            dedent(
+                """\
+                #!/bin/sh
+                echo "$@" >> "$CARGO_LOG"
+                case "$1" in
+                  fmt) exit "${FMT_EXIT:-0}" ;;
+                  clippy) exit "${CLIPPY_EXIT:-0}" ;;
+                esac
+                exit 0
+                """
+            ),
+            encoding="utf-8",
+        )
+        fake_cargo.chmod(0o755)
+
+        env = os.environ.copy()
+        env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
+        env["CARGO_LOG"] = str(log_path)
+        result = self.run_stop(repo_root, env=env)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(result.stderr, "")
+
+        calls = log_path.read_text(encoding="utf-8").splitlines()
+        self.assertGreaterEqual(len(calls), 2)
+        self.assertEqual(calls[0], "fmt --all")
+        self.assertTrue(calls[1].startswith("clippy --fix "))
+
+    def test_stop_hook_denies_if_fmt_fails(self) -> None:
+        repo_root = self.create_repo()
+        (repo_root / "Cargo.toml").write_text(
+            dedent(
+                """\
+                [package]
+                name = "demo"
+                version = "0.1.0"
+                edition = "2021"
+                """
+            ),
+            encoding="utf-8",
+        )
+        src = repo_root / "src"
+        src.mkdir(parents=True, exist_ok=True)
+        (src / "lib.rs").write_text("pub fn f()->i32{1}\n", encoding="utf-8")
+
+        fake_bin = repo_root / "fake-bin"
+        fake_bin.mkdir(parents=True, exist_ok=True)
+        log_path = repo_root / "cargo.log"
+        fake_cargo = fake_bin / "cargo"
+        fake_cargo.write_text(
+            dedent(
+                """\
+                #!/bin/sh
+                echo "$@" >> "$CARGO_LOG"
+                case "$1" in
+                  fmt) echo "fmt failed" 1>&2; exit "${FMT_EXIT:-1}" ;;
+                  clippy) exit "${CLIPPY_EXIT:-0}" ;;
+                esac
+                exit 0
+                """
+            ),
+            encoding="utf-8",
+        )
+        fake_cargo.chmod(0o755)
+
+        env = os.environ.copy()
+        env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
+        env["CARGO_LOG"] = str(log_path)
+        env["FMT_EXIT"] = "1"
+        result = self.run_stop(repo_root, env=env)
+        self.assertEqual(result.returncode, 2)
+        self.assertTrue(result.stdout.strip().startswith("DENY stop_fmt_failed:"))
+        self.assertEqual(result.stderr, "")
+
+        calls = log_path.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(calls, ["fmt --all"])
 
 
 if __name__ == "__main__":
