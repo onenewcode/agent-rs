@@ -155,8 +155,7 @@ fn is_non_content_element(tag: &str) -> bool {
 fn is_supported_html_content_type(content_type: &str) -> bool {
     let media_type = content_type
         .split_once(';')
-        .map(|(media_type, _)| media_type)
-        .unwrap_or(content_type)
+        .map_or(content_type, |(media_type, _)| media_type)
         .trim();
 
     media_type.eq_ignore_ascii_case("text/html")

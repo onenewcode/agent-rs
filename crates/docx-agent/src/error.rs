@@ -24,8 +24,6 @@ pub enum DocxAgentError {
     Xml(#[from] roxmltree::Error),
     #[error("http error: {0}")]
     Http(#[from] reqwest::Error),
-    #[error("url parse error: {0}")]
-    Url(#[from] url::ParseError),
     #[error("unsupported response content type: {0}")]
     UnsupportedContentType(String),
     #[error("document is empty after parsing")]
