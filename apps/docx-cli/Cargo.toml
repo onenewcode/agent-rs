@@ -1,0 +1,16 @@
+[package]
+name = "docx-cli"
+version.workspace = true
+edition.workspace = true
+
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+docx-agent = { path = "../../crates/docx-agent" }
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true
