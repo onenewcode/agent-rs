@@ -1,33 +1,34 @@
 {
   "hooks": {
-    "PostToolUse": [
-      {
-        "hooks": [
-          {
-            "command": "HARNESS_PLATFORM=codex /usr/bin/env python3 \"$(git rev-parse --show-toplevel)/.harness/hooks/post_tool.py\"",
-            "type": "command"
-          }
-        ],
-        "matcher": "Bash"
-      }
-    ],
     "PreToolUse": [
       {
+        "matcher": "Bash",
         "hooks": [
           {
-            "command": "HARNESS_PLATFORM=codex /usr/bin/env python3 \"$(git rev-parse --show-toplevel)/.harness/hooks/pre_tool.py\"",
-            "type": "command"
+            "type": "command",
+            "command": "python3 .harness/hooks/policy_hook.py PreToolUse"
           }
-        ],
-        "matcher": "Bash"
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 .harness/hooks/policy_hook.py PostToolUse"
+          }
+        ]
       }
     ],
     "Stop": [
       {
+        "matcher": "Bash",
         "hooks": [
           {
-            "command": "HARNESS_PLATFORM=codex /usr/bin/env python3 \"$(git rev-parse --show-toplevel)/.harness/hooks/stop.py\"",
-            "type": "command"
+            "type": "command",
+            "command": "python3 .harness/hooks/policy_hook.py Stop"
           }
         ]
       }

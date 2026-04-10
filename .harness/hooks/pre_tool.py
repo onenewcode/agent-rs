@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-from common import run_hook
+import sys
 
+from policy_hook import main as policy_main
 
 if __name__ == "__main__":
-    raise SystemExit(run_hook("pre_tool"))
+    sys.argv = [sys.argv[0], "PreToolUse"]
+    raise SystemExit(policy_main())

@@ -1,36 +1,6 @@
 {
   "hooks": {
-    "PostToolUse": [
-      {
-        "hooks": [
-          {
-            "command": "HARNESS_PLATFORM=claude python3 \"$CLAUDE_PROJECT_DIR/.harness/hooks/post_tool.py\"",
-            "type": "command"
-          }
-        ],
-        "matcher": "Bash|Write|Edit|MultiEdit|NotebookEdit"
-      }
-    ],
-    "PreToolUse": [
-      {
-        "hooks": [
-          {
-            "command": "HARNESS_PLATFORM=claude python3 \"$CLAUDE_PROJECT_DIR/.harness/hooks/pre_tool.py\"",
-            "type": "command"
-          }
-        ],
-        "matcher": "Bash"
-      }
-    ],
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "command": "HARNESS_PLATFORM=claude python3 \"$CLAUDE_PROJECT_DIR/.harness/hooks/stop.py\"",
-            "type": "command"
-          }
-        ]
-      }
-    ]
+    "pre_command": "python3 .harness/hooks/policy_hook.py PreToolUse",
+    "post_command": "python3 .harness/hooks/policy_hook.py PostToolUse"
   }
 }
