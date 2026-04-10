@@ -14,7 +14,9 @@ except ModuleNotFoundError:  # pragma: no cover
 ROOT = Path(__file__).resolve().parents[1]
 POLICY_PATH = ROOT / ".harness" / "policy.toml"
 TASK_PATH = ROOT / ".harness" / "task.md"
-HOOK_PATH = ROOT / ".harness" / "hooks" / "policy_hook.py"
+PRE_HOOK_PATH = ROOT / ".harness" / "hooks" / "pre_tool.py"
+POST_HOOK_PATH = ROOT / ".harness" / "hooks" / "post_tool.py"
+STOP_HOOK_PATH = ROOT / ".harness" / "hooks" / "stop.py"
 
 
 def load_policy() -> dict:
@@ -100,7 +102,7 @@ def render_codex_hooks() -> str:
                     "hooks": [
                         {
                             "type": "command",
-                            "command": f"python3 {HOOK_PATH.relative_to(ROOT)} PreToolUse",
+                            "command": f"python3 {PRE_HOOK_PATH.relative_to(ROOT)}",
                         }
                     ],
                 }
@@ -111,7 +113,7 @@ def render_codex_hooks() -> str:
                     "hooks": [
                         {
                             "type": "command",
-                            "command": f"python3 {HOOK_PATH.relative_to(ROOT)} PostToolUse",
+                            "command": f"python3 {POST_HOOK_PATH.relative_to(ROOT)}",
                         }
                     ],
                 }
@@ -122,7 +124,7 @@ def render_codex_hooks() -> str:
                     "hooks": [
                         {
                             "type": "command",
-                            "command": f"python3 {HOOK_PATH.relative_to(ROOT)} Stop",
+                            "command": f"python3 {STOP_HOOK_PATH.relative_to(ROOT)}",
                         }
                     ],
                 }
@@ -135,8 +137,8 @@ def render_codex_hooks() -> str:
 def render_claude_settings() -> str:
     payload = {
         "hooks": {
-            "pre_command": f"python3 {HOOK_PATH.relative_to(ROOT)} PreToolUse",
-            "post_command": f"python3 {HOOK_PATH.relative_to(ROOT)} PostToolUse",
+            "pre_command": f"python3 {PRE_HOOK_PATH.relative_to(ROOT)}",
+            "post_command": f"python3 {POST_HOOK_PATH.relative_to(ROOT)}",
         }
     }
     return json.dumps(payload, indent=2) + "\n"
@@ -145,8 +147,8 @@ def render_claude_settings() -> str:
 def render_gemini_settings() -> str:
     payload = {
         "hooks": {
-            "pre_command": f"python3 {HOOK_PATH.relative_to(ROOT)} PreToolUse",
-            "post_command": f"python3 {HOOK_PATH.relative_to(ROOT)} PostToolUse",
+            "pre_command": f"python3 {PRE_HOOK_PATH.relative_to(ROOT)}",
+            "post_command": f"python3 {POST_HOOK_PATH.relative_to(ROOT)}",
         }
     }
     return json.dumps(payload, indent=2) + "\n"

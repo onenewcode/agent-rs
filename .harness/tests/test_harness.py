@@ -20,7 +20,6 @@ class HarnessTestCase(unittest.TestCase):
         repo_root = Path(temp_dir.name)
 
         for relative in (
-            ".harness/hooks",
             ".harness/logs",
             ".codex",
             ".claude",
@@ -28,14 +27,17 @@ class HarnessTestCase(unittest.TestCase):
         ):
             (repo_root / relative).mkdir(parents=True, exist_ok=True)
 
+        shutil.copytree(
+            HARNESS_DIR / "hooks",
+            repo_root / ".harness" / "hooks",
+            dirs_exist_ok=True,
+            ignore=shutil.ignore_patterns("__pycache__"),
+        )
+
         copy_map = {
             HARNESS_DIR / "policy.toml": repo_root / ".harness" / "policy.toml",
             HARNESS_DIR / "task.md": repo_root / ".harness" / "task.md",
             HARNESS_DIR / "sync.py": repo_root / ".harness" / "sync.py",
-            HARNESS_DIR / "hooks" / "policy_hook.py": repo_root / ".harness" / "hooks" / "policy_hook.py",
-            HARNESS_DIR / "hooks" / "pre_tool.py": repo_root / ".harness" / "hooks" / "pre_tool.py",
-            HARNESS_DIR / "hooks" / "post_tool.py": repo_root / ".harness" / "hooks" / "post_tool.py",
-            HARNESS_DIR / "hooks" / "stop.py": repo_root / ".harness" / "hooks" / "stop.py",
         }
         for source, destination in copy_map.items():
             shutil.copy2(source, destination)
@@ -99,7 +101,7 @@ class HarnessTestCase(unittest.TestCase):
         subprocess.run([sys.executable, ".harness/sync.py"], cwd=repo_root, check=True)
         hooks = json.loads((repo_root / ".codex" / "hooks.json").read_text(encoding="utf-8"))
         self.assertIn("Stop", hooks["hooks"])
-        self.assertIn("policy_hook.py Stop", hooks["hooks"]["Stop"][0]["hooks"][0]["command"])
+        self.assertIn("stop.py", hooks["hooks"]["Stop"][0]["hooks"][0]["command"])
 
     def test_policy_hook_allows_read_command(self) -> None:
         repo_root = self.create_repo()
@@ -123,6 +125,17 @@ class HarnessTestCase(unittest.TestCase):
         result = self.run_hook(repo_root, "pre_tool.py", "python3 app.py")
         self.assertEqual(result.returncode, 0)
         self.assertIn("Unknown command classification allowed with warning", result.stderr)
+
+    def test_post_hook_allows_normal_write(self) -> None:
+        repo_root = self.create_repo()
+        result = self.run_hook(repo_root, "post_tool.py", "mkdir -p .harness/tmp")
+        self.assertEqual(result.returncode, 0)
+
+    def test_stop_hook_blocks_git_path_write(self) -> None:
+        repo_root = self.create_repo()
+        result = self.run_hook(repo_root, "stop.py", "git add .git/config")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("Write to blocked path detected", result.stdout)
 
     def test_policy_hook_writes_structured_log(self) -> None:
         repo_root = self.create_repo()

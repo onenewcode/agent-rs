@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 .harness/hooks/policy_hook.py PreToolUse"
+            "command": "python3 .harness/hooks/pre_tool.py"
           }
         ]
       }
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 .harness/hooks/policy_hook.py PostToolUse"
+            "command": "python3 .harness/hooks/post_tool.py"
           }
         ]
       }
@@ -28,7 +28,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 .harness/hooks/policy_hook.py Stop"
+            "command": "python3 .harness/hooks/stop.py"
           }
         ]
       }
