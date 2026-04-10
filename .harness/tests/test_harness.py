@@ -110,15 +110,15 @@ class HarnessTestCase(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0)
         for relative in (
-            "AGENTS.md",
-            "CLAUDE.md",
-            "GEMINI.md",
+            ".harness/instructions.md",
             ".codex/hooks.json",
             ".codex/rules/commands.md",
             ".claude/settings.json",
             ".gemini/settings.json",
         ):
             self.assertTrue((repo_root / relative).exists(), relative)
+        for relative in ("AGENTS.md", "CLAUDE.md", "GEMINI.md"):
+            self.assertFalse((repo_root / relative).exists(), relative)
 
     def test_sync_is_idempotent(self) -> None:
         repo_root = self.create_repo()
@@ -126,9 +126,7 @@ class HarnessTestCase(unittest.TestCase):
         snapshot = {
             relative: (repo_root / relative).read_text(encoding="utf-8")
             for relative in (
-                "AGENTS.md",
-                "CLAUDE.md",
-                "GEMINI.md",
+                ".harness/instructions.md",
                 ".codex/hooks.json",
                 ".codex/rules/commands.md",
                 ".claude/settings.json",
@@ -138,6 +136,23 @@ class HarnessTestCase(unittest.TestCase):
         subprocess.run([sys.executable, ".harness/sync.py"], cwd=repo_root, check=True)
         current = {relative: (repo_root / relative).read_text(encoding="utf-8") for relative in snapshot}
         self.assertEqual(snapshot, current)
+
+    def test_agent_files_contain_single_shared_reference(self) -> None:
+        repo_root = self.create_repo()
+        for relative in ("AGENTS.md", "CLAUDE.md", "GEMINI.md"):
+            (repo_root / relative).write_text("placeholder\n", encoding="utf-8")
+        subprocess.run([sys.executable, ".harness/sync.py"], cwd=repo_root, check=True)
+        for relative in ("AGENTS.md", "CLAUDE.md", "GEMINI.md"):
+            content = (repo_root / relative).read_text(encoding="utf-8")
+            self.assertEqual(content.count(".harness/instructions.md"), 1, relative)
+            self.assertNotIn("## Policy Summary", content)
+
+    def test_shared_instructions_contain_policy_summary(self) -> None:
+        repo_root = self.create_repo()
+        subprocess.run([sys.executable, ".harness/sync.py"], cwd=repo_root, check=True)
+        content = (repo_root / ".harness" / "instructions.md").read_text(encoding="utf-8")
+        self.assertIn("## Policy Summary", content)
+        self.assertIn("Current goals:", content)
 
     def test_codex_hooks_use_single_runner(self) -> None:
         repo_root = self.create_repo()
