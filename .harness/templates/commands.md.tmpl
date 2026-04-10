@@ -9,11 +9,21 @@ Readable copy of the shared shell-command policy used by the Harness hook.
 - Commands are split by `&&`, `||`, `;`, and `|`, then evaluated segment-by-segment.
 - The strictest matched decision wins (`deny` > `warn` > `allow`).
 - Blocked prefixes always deny.
-- Commands outside documented read-only prefixes are handled by `unknown_command = {unknown_mode}`.
+- Commands outside configured prefixes are handled by `unknown_command = {unknown_mode}`.
 
-## Allowed Command Prefixes
+## Hook Output
 
-{allowed_commands}
+- `allow`: no output
+- `warn`: `WARN <code>` (stderr)
+- `deny`: `DENY <code>[:detail]` (stdout)
+
+## Read Command Prefixes
+
+{read_commands}
+
+## Write Command Prefixes
+
+{write_commands}
 
 ## Blocked Command Prefixes
 

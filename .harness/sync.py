@@ -70,10 +70,10 @@ def normalize_task(task_text: str) -> str:
 
 def unknown_mode_behavior(unknown_mode: str) -> str:
     if unknown_mode == "allow_warn":
-        return "commands outside documented read-only prefixes are warned and allowed"
+        return "commands outside configured prefixes are warned and allowed"
     if unknown_mode == "allow_silent":
-        return "commands outside documented read-only prefixes are allowed silently"
-    return "commands outside documented read-only prefixes are denied"
+        return "commands outside configured prefixes are allowed silently"
+    return "commands outside configured prefixes are denied"
 
 
 def policy_summary(policy: dict) -> str:
@@ -81,9 +81,10 @@ def policy_summary(policy: dict) -> str:
     commands = policy.get("commands", {})
     enforcement = policy.get("enforcement", {})
 
-    blocked_paths = paths.get("blocked_write_paths", paths.get("blocked_paths", []))
+    blocked_paths = paths.get("blocked_write_paths", [])
     blocked_cmds = commands.get("blocked_prefixes", [])
     allowed_cmds = commands.get("allowed_prefixes", [])
+    write_cmds = commands.get("write_prefixes", [])
     scope = enforcement.get("scope", "writes_and_high_risk_only")
     unknown = enforcement.get("unknown_command", "allow_warn")
 
@@ -101,7 +102,13 @@ def policy_summary(policy: dict) -> str:
 
         Command policy:
         - Blocked (destructive) prefixes: {", ".join(f"`{c}`" for c in blocked_cmds) if blocked_cmds else "(none)"}
-        - Documented read-only prefixes: {", ".join(f"`{c}`" for c in allowed_cmds) if allowed_cmds else "(none)"}
+        - Read-only prefixes: {", ".join(f"`{c}`" for c in allowed_cmds) if allowed_cmds else "(none)"}
+        - Write prefixes: {", ".join(f"`{c}`" for c in write_cmds) if write_cmds else "(none)"}
+
+        Hook output:
+        - `allow`: no output
+        - `warn`: `WARN <code>` (stderr, single line)
+        - `deny`: `DENY <code>[:detail]` (stdout, single line)
         """
     ).rstrip()
 
@@ -145,6 +152,7 @@ def render_commands_rules(policy: dict) -> str:
     commands = policy.get("commands", {})
     enforcement = policy.get("enforcement", {})
     allowed = list(commands.get("allowed_prefixes", []))
+    write = list(commands.get("write_prefixes", []))
     blocked = list(commands.get("blocked_prefixes", []))
     unknown = enforcement.get("unknown_command", "allow_warn")
 
@@ -161,11 +169,21 @@ def render_commands_rules(policy: dict) -> str:
         - Commands are split by `&&`, `||`, `;`, and `|`, then evaluated segment-by-segment.
         - The strictest matched decision wins (`deny` > `warn` > `allow`).
         - Blocked prefixes always deny.
-        - Commands outside documented read-only prefixes are handled by `unknown_command = {unknown_mode}`.
+        - Commands outside configured prefixes are handled by `unknown_command = {unknown_mode}`.
 
-        ## Allowed Command Prefixes
+        ## Hook Output
 
-        {allowed_commands}
+        - `allow`: no output
+        - `warn`: `WARN <code>` (stderr)
+        - `deny`: `DENY <code>[:detail]` (stdout)
+
+        ## Read Command Prefixes
+
+        {read_commands}
+
+        ## Write Command Prefixes
+
+        {write_commands}
 
         ## Blocked Command Prefixes
 
@@ -175,7 +193,8 @@ def render_commands_rules(policy: dict) -> str:
     template = load_template(COMMANDS_TMPL_PATH, default_template)
     return template.format(
         unknown_mode=unknown,
-        allowed_commands=as_markdown_list(allowed),
+        read_commands=as_markdown_list(allowed),
+        write_commands=as_markdown_list(write),
         blocked_commands=as_markdown_list(blocked),
     ).rstrip() + "\n"
 

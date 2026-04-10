@@ -22,7 +22,7 @@ Constraints:
 
 Enforcement scope:
 - `writes_and_high_risk_only`
-- Unknown command handling: `allow_warn` (commands outside documented read-only prefixes are warned and allowed)
+- Unknown command handling: `allow_warn` (commands outside configured prefixes are warned and allowed)
 
 Path policy:
 - Mode: `blocklist_only`
@@ -30,4 +30,10 @@ Path policy:
 
 Command policy:
 - Blocked (destructive) prefixes: `rm`, `git reset`, `git checkout`, `git clean`
-- Documented read-only prefixes: `git status`, `git diff`, `git ls-files`, `ls`, `cat`, `rg`
+- Read-only prefixes: `git status`, `git diff`, `git ls-files`, `ls`, `cat`, `rg`
+- Write prefixes: `git add`, `git commit`, `git mv`, `git rm`, `git apply`, `touch`, `mkdir`, `cp`, `mv`, `tee`, `truncate`, `chmod`, `chown`, `ln`
+
+Hook output:
+- `allow`: no output
+- `warn`: `WARN <code>` (stderr, single line)
+- `deny`: `DENY <code>[:detail]` (stdout, single line)

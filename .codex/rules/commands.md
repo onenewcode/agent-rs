@@ -9,9 +9,15 @@ Readable copy of the shared shell-command policy used by the Harness hook.
 - Commands are split by `&&`, `||`, `;`, and `|`, then evaluated segment-by-segment.
 - The strictest matched decision wins (`deny` > `warn` > `allow`).
 - Blocked prefixes always deny.
-- Commands outside documented read-only prefixes are handled by `unknown_command = allow_warn`.
+- Commands outside configured prefixes are handled by `unknown_command = allow_warn`.
 
-## Allowed Command Prefixes
+## Hook Output
+
+- `allow`: no output
+- `warn`: `WARN <code>` (stderr)
+- `deny`: `DENY <code>[:detail]` (stdout)
+
+## Read Command Prefixes
 
 - `git status`
 - `git diff`
@@ -19,6 +25,23 @@ Readable copy of the shared shell-command policy used by the Harness hook.
 - `ls`
 - `cat`
 - `rg`
+
+## Write Command Prefixes
+
+- `git add`
+- `git commit`
+- `git mv`
+- `git rm`
+- `git apply`
+- `touch`
+- `mkdir`
+- `cp`
+- `mv`
+- `tee`
+- `truncate`
+- `chmod`
+- `chown`
+- `ln`
 
 ## Blocked Command Prefixes
 

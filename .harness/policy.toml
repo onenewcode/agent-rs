@@ -1,39 +1,3 @@
-# Legacy-compatible top-level fields (consumed by older hook implementations).
-allowed_paths = [
-  "**",
-  ".harness/**",
-  ".codex/**",
-  ".claude/**",
-  ".gemini/**",
-  "AGENTS.md",
-  "CLAUDE.md",
-  "GEMINI.md",
-  ".gitignore",
-  "Cargo.toml",
-  "Cargo.lock",
-  "agent.example.toml",
-  "apps/**",
-  "crates/**",
-]
-blocked_paths = [".git/**"]
-
-allowed_commands = [
-  "git status",
-  "git diff",
-  "git ls-files",
-  "ls",
-  "cat",
-  "rg",
-  "python3 .harness/sync.py",
-  "python3",
-]
-blocked_commands = [
-  "rm",
-  "git reset",
-  "git checkout",
-  "git clean",
-]
-
 [policy]
 version = 1
 
@@ -44,7 +8,6 @@ unknown_command = "allow_warn"
 [paths]
 mode = "blocklist_only"
 blocked_write_paths = [".git/**"]
-allowed_write_paths = ["**"]
 
 [commands]
 allowed_prefixes = [
@@ -54,6 +17,22 @@ allowed_prefixes = [
   "ls",
   "cat",
   "rg",
+]
+write_prefixes = [
+  "git add",
+  "git commit",
+  "git mv",
+  "git rm",
+  "git apply",
+  "touch",
+  "mkdir",
+  "cp",
+  "mv",
+  "tee",
+  "truncate",
+  "chmod",
+  "chown",
+  "ln",
 ]
 blocked_prefixes = [
   "rm",

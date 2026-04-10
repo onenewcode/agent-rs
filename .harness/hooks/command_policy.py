@@ -4,46 +4,6 @@ import re
 from typing import Any
 
 
-READ_PREFIXES: tuple[str, ...] = (
-    "git status",
-    "git diff",
-    "git ls-files",
-    "ls",
-    "cat",
-    "rg",
-    "pwd",
-    "which",
-    "echo",
-    "head",
-    "tail",
-    "wc",
-)
-
-WRITE_PREFIXES: tuple[str, ...] = (
-    "git add",
-    "git commit",
-    "git mv",
-    "git rm",
-    "git apply",
-    "touch",
-    "mkdir",
-    "cp",
-    "mv",
-    "tee",
-    "truncate",
-    "chmod",
-    "chown",
-    "ln",
-)
-
-HIGH_RISK_PREFIXES: tuple[str, ...] = (
-    "rm",
-    "git reset",
-    "git checkout",
-    "git clean",
-)
-
-
 def extract_command_from_raw(raw: str) -> str:
     if not raw:
         return ""
@@ -176,7 +136,13 @@ def raw_contains_prefix(raw: str, prefixes: list[str]) -> str | None:
     return None
 
 
-def classify_command(command: str) -> str:
+def classify_command(
+    command: str,
+    *,
+    allowed_prefixes: list[str],
+    write_prefixes: list[str],
+    high_risk_prefixes: list[str],
+) -> str:
     """
     Return one of: read | write | high_risk | unknown
     """
@@ -185,13 +151,25 @@ def classify_command(command: str) -> str:
         return "unknown"
 
     low = normalized.lower()
-    if any(low == prefix or low.startswith(prefix + " ") for prefix in HIGH_RISK_PREFIXES):
+    if any(
+        low == prefix.lower() or low.startswith(prefix.lower() + " ")
+        for prefix in high_risk_prefixes
+        if prefix.strip()
+    ):
         return "high_risk"
 
-    if any(low == prefix or low.startswith(prefix + " ") for prefix in READ_PREFIXES):
+    if any(
+        low == prefix.lower() or low.startswith(prefix.lower() + " ")
+        for prefix in allowed_prefixes
+        if prefix.strip()
+    ):
         return "read"
 
-    if any(low == prefix or low.startswith(prefix + " ") for prefix in WRITE_PREFIXES):
+    if any(
+        low == prefix.lower() or low.startswith(prefix.lower() + " ")
+        for prefix in write_prefixes
+        if prefix.strip()
+    ):
         return "write"
 
     if any(token in normalized for token in (">", ">>")):
