@@ -34,11 +34,6 @@ blocked_commands = [
   "git clean",
 ]
 
-# Effectively disable hard budget blocking for legacy hook code paths.
-max_files_changed = 9999
-max_lines_added = 200000
-max_lines_deleted = 200000
-
 [policy]
 version = 1
 
@@ -72,14 +67,3 @@ high_risk_prefixes = [
   "git checkout",
   "git clean",
 ]
-
-[diff_budget]
-enabled = false
-max_files_changed = 9999
-max_lines_added = 200000
-max_lines_deleted = 200000
-
-[logging]
-enabled = true
-dir = ".harness/logs"
-format = "jsonl"

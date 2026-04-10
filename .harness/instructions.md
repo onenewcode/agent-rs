@@ -10,8 +10,7 @@ Keep Codex, Claude, and Gemini aligned around one shared task file and one share
 
 Current goals:
 - Generate each platform's instruction and hook/config artifacts from `.harness/policy.toml` and `.harness/task.md`.
-- Enforce command, path, and diff-budget checks through one Python hook implementation.
-- Write structured hook decisions into `.harness/logs/*.jsonl`.
+- Enforce command and path checks through one Python hook implementation.
 
 Constraints:
 - Use Python only.
@@ -32,7 +31,3 @@ Path policy:
 Command policy:
 - Blocked (destructive) prefixes: `rm`, `git reset`, `git checkout`, `git clean`
 - Documented read-only prefixes: `git status`, `git diff`, `git ls-files`, `ls`, `cat`, `rg`
-
-Diff budget:
-- Enabled: `false`
-- Limits: `files<=9999, added<=200000, deleted<=200000`

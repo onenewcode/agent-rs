@@ -79,7 +79,6 @@ def unknown_mode_behavior(unknown_mode: str) -> str:
 def policy_summary(policy: dict) -> str:
     paths = policy.get("paths", {})
     commands = policy.get("commands", {})
-    diff_budget = policy.get("diff_budget", {})
     enforcement = policy.get("enforcement", {})
 
     blocked_paths = paths.get("blocked_write_paths", paths.get("blocked_paths", []))
@@ -87,12 +86,6 @@ def policy_summary(policy: dict) -> str:
     allowed_cmds = commands.get("allowed_prefixes", [])
     scope = enforcement.get("scope", "writes_and_high_risk_only")
     unknown = enforcement.get("unknown_command", "allow_warn")
-    budget_enabled = bool(diff_budget.get("enabled", False))
-    budget_limits = (
-        f"files<={diff_budget.get('max_files_changed', 0)}, "
-        f"added<={diff_budget.get('max_lines_added', 0)}, "
-        f"deleted<={diff_budget.get('max_lines_deleted', 0)}"
-    )
 
     return dedent(
         f"""\
@@ -109,10 +102,6 @@ def policy_summary(policy: dict) -> str:
         Command policy:
         - Blocked (destructive) prefixes: {", ".join(f"`{c}`" for c in blocked_cmds) if blocked_cmds else "(none)"}
         - Documented read-only prefixes: {", ".join(f"`{c}`" for c in allowed_cmds) if allowed_cmds else "(none)"}
-
-        Diff budget:
-        - Enabled: `{str(budget_enabled).lower()}`
-        - Limits: `{budget_limits}`
         """
     ).rstrip()
 

@@ -4,8 +4,7 @@ Keep Codex, Claude, and Gemini aligned around one shared task file and one share
 
 Current goals:
 - Generate each platform's instruction and hook/config artifacts from `.harness/policy.toml` and `.harness/task.md`.
-- Enforce command, path, and diff-budget checks through one Python hook implementation.
-- Write structured hook decisions into `.harness/logs/*.jsonl`.
+- Enforce command and path checks through one Python hook implementation.
 
 Constraints:
 - Use Python only.

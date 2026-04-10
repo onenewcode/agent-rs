@@ -20,7 +20,6 @@ class HarnessTestCase(unittest.TestCase):
         repo_root = Path(temp_dir.name)
 
         for relative in (
-            ".harness/logs",
             ".harness/templates",
             ".codex",
             ".claude",
@@ -28,12 +27,17 @@ class HarnessTestCase(unittest.TestCase):
         ):
             (repo_root / relative).mkdir(parents=True, exist_ok=True)
 
-        shutil.copytree(
-            HARNESS_DIR / "hooks",
-            repo_root / ".harness" / "hooks",
-            dirs_exist_ok=True,
-            ignore=shutil.ignore_patterns("__pycache__"),
+        required_hooks = (
+            "command_policy.py",
+            "hook_types.py",
+            "path_policy.py",
+            "policy_hook.py",
+            "policy_io.py",
         )
+        hooks_dir = repo_root / ".harness" / "hooks"
+        hooks_dir.mkdir(parents=True, exist_ok=True)
+        for filename in required_hooks:
+            shutil.copy2(HARNESS_DIR / "hooks" / filename, hooks_dir / filename)
 
         copy_map = {
             HARNESS_DIR / "policy.toml": repo_root / ".harness" / "policy.toml",
@@ -63,41 +67,6 @@ class HarnessTestCase(unittest.TestCase):
             capture_output=True,
             check=False,
         )
-
-    def init_git_repo(self, repo_root: Path) -> None:
-        subprocess.run(["git", "init"], cwd=repo_root, check=True, capture_output=True, text=True)
-        subprocess.run(["git", "config", "user.name", "Harness Test"], cwd=repo_root, check=True, capture_output=True, text=True)
-        subprocess.run(
-            ["git", "config", "user.email", "harness-test@example.com"],
-            cwd=repo_root,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        readme = repo_root / "README.md"
-        readme.write_text("seed\n", encoding="utf-8")
-        subprocess.run(["git", "add", "README.md"], cwd=repo_root, check=True, capture_output=True, text=True)
-        subprocess.run(["git", "commit", "-m", "seed"], cwd=repo_root, check=True, capture_output=True, text=True)
-
-    def set_diff_budget(self, repo_root: Path, enabled: bool, files: int, added: int, deleted: int) -> None:
-        path = repo_root / ".harness" / "policy.toml"
-        old = (
-            "[diff_budget]\n"
-            "enabled = false\n"
-            "max_files_changed = 9999\n"
-            "max_lines_added = 200000\n"
-            "max_lines_deleted = 200000"
-        )
-        new = (
-            "[diff_budget]\n"
-            f"enabled = {str(enabled).lower()}\n"
-            f"max_files_changed = {files}\n"
-            f"max_lines_added = {added}\n"
-            f"max_lines_deleted = {deleted}"
-        )
-        text = path.read_text(encoding="utf-8")
-        self.assertIn(old, text)
-        path.write_text(text.replace(old, new), encoding="utf-8")
 
     def test_sync_generates_all_outputs(self) -> None:
         repo_root = self.create_repo()
@@ -193,31 +162,6 @@ class HarnessTestCase(unittest.TestCase):
         result = self.run_event(repo_root, "PreToolUse", "python3 app.py")
         self.assertEqual(result.returncode, 0)
         self.assertIn("Unknown command classification allowed with warning", result.stderr)
-
-    def test_diff_budget_denies_when_enabled_and_exceeded(self) -> None:
-        repo_root = self.create_repo()
-        self.init_git_repo(repo_root)
-        self.set_diff_budget(repo_root, enabled=True, files=0, added=0, deleted=0)
-
-        readme = repo_root / "README.md"
-        readme.write_text("seed\nchange\n", encoding="utf-8")
-
-        result = self.run_event(repo_root, "PostToolUse", "mkdir -p .harness/tmp")
-        self.assertEqual(result.returncode, 2)
-        self.assertIn("Diff budget exceeded", result.stdout)
-
-    def test_policy_hook_writes_structured_log(self) -> None:
-        repo_root = self.create_repo()
-        self.run_event(repo_root, "PreToolUse", "git status", platform="codex")
-        logs = sorted((repo_root / ".harness" / "logs").glob("*.jsonl"))
-        self.assertTrue(logs)
-        entry = json.loads(logs[-1].read_text(encoding="utf-8").splitlines()[-1])
-        self.assertEqual(entry["event"], "PreToolUse")
-        self.assertEqual(entry["platform"], "codex")
-        self.assertIn("policy_version", entry)
-        self.assertIn("decision_latency_ms", entry)
-        self.assertIn("metadata", entry)
-
 
 if __name__ == "__main__":
     unittest.main()
