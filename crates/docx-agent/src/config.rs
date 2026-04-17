@@ -5,12 +5,18 @@ use tracing::info;
 
 use crate::error::DocxAgentError;
 
+pub(crate) const SYSTEM_PROMPT_DEFAULT: &str = r"你是 Word 文档扩写助手。仅基于给定 DOCX、用户要求、URL/搜索材料写作；材料不足时说明假设与边界，不得编造事实或最新数据。输出中文 Markdown，不加引用编号；优先沿用原文主题、术语与结构，必要时补充合理小节。";
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct DocxAgentConfig {
     pub llm: LlmConfig,
     pub search: SearchConfig,
     pub limits: LimitsConfig,
     pub fetch: FetchConfig,
+    #[serde(default)]
+    pub search_policy: SearchPolicyConfig,
+    pub system_prompt: Option<String>,
+    pub max_generation_attempts: Option<usize>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -38,6 +44,82 @@ pub struct FetchConfig {
     pub user_agent: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct SearchPolicyConfig {
+    #[serde(default = "SearchPolicyConfig::default_negations")]
+    pub negations: Vec<String>,
+    #[serde(default = "SearchPolicyConfig::default_hints")]
+    pub hints: Vec<String>,
+}
+
+impl Default for SearchPolicyConfig {
+    fn default() -> Self {
+        Self {
+            negations: Self::default_negations(),
+            hints: Self::default_hints(),
+        }
+    }
+}
+
+impl SearchPolicyConfig {
+    fn default_negations() -> Vec<String> {
+        [
+            "不要联网",
+            "不要搜索",
+            "不要检索",
+            "无需联网",
+            "无需搜索",
+            "无需检索",
+            "不需要联网",
+            "不需要搜索",
+            "不需要检索",
+            "别联网",
+            "别搜索",
+            "别检索",
+            "do not search",
+            "don't search",
+            "no search",
+            "without search",
+            "do not browse",
+            "don't browse",
+            "no browsing",
+            "do not use web",
+            "don't use web",
+            "no web search",
+            "without web search",
+            "do not use internet",
+            "don't use internet",
+        ]
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect()
+    }
+
+    fn default_hints() -> Vec<String> {
+        [
+            "搜索", "联网", "最新", "案例", "数据", "资料", "参考", "研究", "趋势", "现状",
+            "latest", "current", "search", "research",
+        ]
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect()
+    }
+
+    pub(crate) fn should_search(&self, prompt: &str) -> bool {
+        let lower = prompt.to_ascii_lowercase();
+        if self
+            .negations
+            .iter()
+            .any(|neg| lower.contains(&neg.to_ascii_lowercase()))
+        {
+            return false;
+        }
+        self.hints
+            .iter()
+            .any(|hint| lower.contains(&hint.to_ascii_lowercase()))
+    }
+}
+
 impl DocxAgentConfig {
     pub fn from_path(path: &Path) -> Result<Self, DocxAgentError> {
         if !path.exists() {
@@ -45,7 +127,7 @@ impl DocxAgentConfig {
         }
 
         let content = fs::read_to_string(path)?;
-        let config: Self = toml::from_str(&content)?;
+        let mut config: Self = toml::from_str(&content)?;
         config.validate()?;
         info!(
             config = %path.display(),
@@ -58,7 +140,7 @@ impl DocxAgentConfig {
         Ok(config)
     }
 
-    pub(crate) fn validate(&self) -> Result<(), DocxAgentError> {
+    pub(crate) fn validate(&mut self) -> Result<(), DocxAgentError> {
         if self.llm.provider != "openrouter" {
             return Err(DocxAgentError::UnsupportedProvider {
                 kind: "llm",
@@ -81,6 +163,16 @@ impl DocxAgentConfig {
 
         Ok(())
     }
+
+    pub(crate) fn system_prompt(&self) -> &str {
+        self.system_prompt
+            .as_deref()
+            .unwrap_or(SYSTEM_PROMPT_DEFAULT)
+    }
+
+    pub(crate) fn max_generation_attempts(&self) -> usize {
+        self.max_generation_attempts.unwrap_or(3)
+    }
 }
 
 fn validate_secret(field: &'static str, value: &str) -> Result<(), DocxAgentError> {
@@ -100,4 +192,21 @@ fn validate_secret(field: &'static str, value: &str) -> Result<(), DocxAgentErro
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SearchPolicyConfig;
+
+    #[test]
+    fn search_policy_defaults_are_populated() {
+        let policy = SearchPolicyConfig::default();
+        assert_eq!(policy.negations.len(), 25);
+        assert_eq!(policy.hints.len(), 14);
+    }
+
+    #[test]
+    fn system_prompt_default_is_not_empty() {
+        assert!(!super::SYSTEM_PROMPT_DEFAULT.is_empty());
+    }
 }

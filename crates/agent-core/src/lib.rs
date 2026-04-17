@@ -92,6 +92,16 @@ pub trait UrlFetcher: Send + Sync {
     async fn fetch(&self, url: &str) -> Result<FetchedSource, BoxError>;
 }
 
+#[must_use]
+pub fn truncate_chars(value: &str, limit: usize) -> String {
+    value.chars().take(limit).collect()
+}
+
+#[must_use]
+pub fn normalize_whitespace(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 #[async_trait]
 pub trait ExpansionRuntime: Send + Sync {
     async fn expand(&self, request: ExpansionRequest) -> Result<ExpansionResult, BoxError>;

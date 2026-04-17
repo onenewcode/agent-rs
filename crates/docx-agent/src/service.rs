@@ -1,8 +1,8 @@
 use std::{path::Path, time::Duration};
 
 use agent_core::{
-    DocumentParser, ExpansionRequest, ExpansionResult, ExpansionRuntime, FetchedSource,
-    ParsedDocument, SearchBackend, UrlFetcher,
+    truncate_chars, DocumentParser, ExpansionRequest, ExpansionResult, ExpansionRuntime,
+    FetchedSource, ParsedDocument, SearchBackend, UrlFetcher,
 };
 use async_trait::async_trait;
 use rig::{client::CompletionClient, completion::Prompt, providers::openrouter};
@@ -12,8 +12,6 @@ use crate::{
     config::DocxAgentConfig, error::DocxAgentError, fetch::WebPageFetcher,
     parser::DocxDocumentParser, search::TavilySearchClient,
 };
-
-const SYSTEM_PROMPT: &str = r"你是 Word 文档扩写助手。仅基于给定 DOCX、用户要求、URL/搜索材料写作；材料不足时说明假设与边界，不得编造事实或最新数据。输出中文 Markdown，不加引用编号；优先沿用原文主题、术语与结构，必要时补充合理小节。";
 
 pub struct DocxExpansionService {
     config: DocxAgentConfig,
@@ -88,40 +86,13 @@ impl DocxExpansionService {
         &self,
         request: &ExpansionRequest,
     ) -> Result<(Vec<String>, Vec<FetchedSource>), DocxAgentError> {
+        let mut sources = self.fetch_user_urls(&request.user_urls).await?;
+
+        let search_result = self.search_if_needed(request).await?;
         let mut search_queries = Vec::new();
-        let mut sources = Vec::new();
-
-        for url in &request.user_urls {
-            sources.push(
-                self.url_fetcher
-                    .fetch(url)
-                    .await
-                    .map_err(into_docx_agent_error)?,
-            );
-        }
-
-        let search_requested = should_search(&request.prompt);
-        info!(
-            search_requested,
-            search_enabled = self.search_backend.is_some(),
-            user_urls = request.user_urls.len(),
-            "evaluated external research policy"
-        );
-
-        if search_requested {
-            let query = build_search_query(request);
-            if let Some(backend) = self.search_backend.as_ref() {
-                let results = backend
-                    .search(&query, self.config.search.max_results)
-                    .await
-                    .map_err(into_docx_agent_error)?;
-                if !results.is_empty() {
-                    search_queries.push(query);
-                    sources.extend(results);
-                }
-            } else {
-                warn!("prompt requested search but no search API key is configured");
-            }
+        if let Some((query, results)) = search_result {
+            search_queries.push(query);
+            sources.extend(results);
         }
 
         info!(
@@ -132,29 +103,89 @@ impl DocxExpansionService {
         Ok((search_queries, sources))
     }
 
-    async fn generate_content(
+    async fn fetch_user_urls(
+        &self,
+        urls: &[String],
+    ) -> Result<Vec<FetchedSource>, DocxAgentError> {
+        let mut sources = Vec::new();
+        for url in urls {
+            sources.push(
+                self.url_fetcher
+                    .fetch(url)
+                    .await
+                    .map_err(into_docx_agent_error)?,
+            );
+        }
+        Ok(sources)
+    }
+
+    async fn search_if_needed(
         &self,
         request: &ExpansionRequest,
-        sources: &[FetchedSource],
-    ) -> Result<String, DocxAgentError> {
+    ) -> Result<Option<(String, Vec<FetchedSource>)>, DocxAgentError> {
+        let search_requested = self.config.search_policy.should_search(&request.prompt);
+        info!(
+            search_requested,
+            search_enabled = self.search_backend.is_some(),
+            user_urls = request.user_urls.len(),
+            "evaluated external research policy"
+        );
+
+        if !search_requested {
+            return Ok(None);
+        }
+
+        let query = build_search_query(request);
+        if let Some(backend) = self.search_backend.as_ref() {
+            let results = backend
+                .search(&query, self.config.search.max_results)
+                .await
+                .map_err(into_docx_agent_error)?;
+            if results.is_empty() {
+                return Ok(None);
+            }
+            Ok(Some((query, results)))
+        } else {
+            warn!("prompt requested search but no search API key is configured");
+            Ok(None)
+        }
+    }
+
+    fn build_openrouter_client(&self) -> Result<openrouter::Client, DocxAgentError> {
         let http_client = reqwest::Client::builder()
             .user_agent(&self.config.fetch.user_agent)
             .no_gzip()
             .no_brotli()
             .no_deflate()
             .build()?;
-        let client = openrouter::Client::builder()
+        openrouter::Client::builder()
             .api_key(self.config.llm.api_key.as_str())
             .http_client(http_client)
             .build()
             .map_err(|error| {
                 DocxAgentError::Agent(format!("failed to build OpenRouter client: {error}"))
-            })?;
-        let agent = client
+            })
+    }
+
+    fn build_agent(
+        &self,
+        client: &openrouter::Client,
+    ) -> impl Prompt {
+        client
             .agent(&self.config.llm.model)
-            .preamble(SYSTEM_PROMPT)
-            .build();
-        let prompt = render_generation_prompt(request, sources, self.config.limits.document_chars);
+            .preamble(self.config.system_prompt())
+            .build()
+    }
+
+    async fn generate_content(
+        &self,
+        request: &ExpansionRequest,
+        sources: &[FetchedSource],
+    ) -> Result<String, DocxAgentError> {
+        let client = self.build_openrouter_client()?;
+        let agent = self.build_agent(&client);
+        let prompt =
+            render_generation_prompt(request, sources, self.config.limits.document_chars);
         info!(
             model = %self.config.llm.model,
             prompt_chars = prompt.chars().count(),
@@ -162,7 +193,13 @@ impl DocxExpansionService {
             "sending generation request to OpenRouter"
         );
 
-        generate_with_retry(&agent, &prompt, &self.config.llm.model).await
+        generate_with_retry(
+            &agent,
+            &prompt,
+            &self.config.llm.model,
+            self.config.max_generation_attempts(),
+        )
+        .await
     }
 }
 
@@ -181,49 +218,6 @@ impl ExpansionRuntime for DocxExpansionService {
             sources,
         })
     }
-}
-
-fn should_search(prompt: &str) -> bool {
-    const SEARCH_NEGATIONS: [&str; 25] = [
-        "不要联网",
-        "不要搜索",
-        "不要检索",
-        "无需联网",
-        "无需搜索",
-        "无需检索",
-        "不需要联网",
-        "不需要搜索",
-        "不需要检索",
-        "别联网",
-        "别搜索",
-        "别检索",
-        "do not search",
-        "don't search",
-        "no search",
-        "without search",
-        "do not browse",
-        "don't browse",
-        "no browsing",
-        "do not use web",
-        "don't use web",
-        "no web search",
-        "without web search",
-        "do not use internet",
-        "don't use internet",
-    ];
-    const SEARCH_HINTS: [&str; 14] = [
-        "搜索", "联网", "最新", "案例", "数据", "资料", "参考", "研究", "趋势", "现状", "latest",
-        "current", "search", "research",
-    ];
-
-    let lower = prompt.to_ascii_lowercase();
-    if SEARCH_NEGATIONS.iter().any(|hint| lower.contains(hint)) {
-        return false;
-    }
-
-    SEARCH_HINTS
-        .iter()
-        .any(|hint| prompt.contains(hint) || lower.contains(hint))
 }
 
 fn build_search_query(request: &ExpansionRequest) -> String {
@@ -245,7 +239,8 @@ fn render_generation_prompt(
     sources: &[FetchedSource],
     max_document_chars: usize,
 ) -> String {
-    let document_markdown = truncate_chars(&request.document.render_markdown(), max_document_chars);
+    let document_markdown =
+        truncate_chars(&request.document.render_markdown(), max_document_chars);
     let source_sections = if sources.is_empty() {
         "无".to_owned()
     } else {
@@ -278,18 +273,13 @@ fn render_generation_prompt(
     )
 }
 
-fn truncate_chars(value: &str, limit: usize) -> String {
-    value.chars().take(limit).collect()
-}
-
 async fn generate_with_retry(
     agent: &impl Prompt,
     prompt: &str,
     model: &str,
+    max_attempts: usize,
 ) -> Result<String, DocxAgentError> {
-    const MAX_ATTEMPTS: usize = 3;
-
-    for attempt in 1..=MAX_ATTEMPTS {
+    for attempt in 1..=max_attempts {
         match agent.prompt(prompt).await {
             Ok(content) => {
                 info!(
@@ -303,7 +293,7 @@ async fn generate_with_retry(
             Err(error) => {
                 let message = error.to_string();
                 let retryable = is_retryable_llm_error(&message);
-                if retryable && attempt < MAX_ATTEMPTS {
+                if retryable && attempt < max_attempts {
                     let delay = Duration::from_secs((attempt as u64) * 2);
                     warn!(
                         model,
@@ -355,20 +345,31 @@ fn into_docx_agent_error(error: agent_core::BoxError) -> DocxAgentError {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_search_query, is_retryable_llm_error, should_search};
+    use super::{build_search_query, is_retryable_llm_error};
+    use crate::config::SearchPolicyConfig;
     use agent_core::{ExpansionRequest, ParsedDocument};
 
     #[test]
     fn search_policy_uses_prompt_hints() {
-        assert!(should_search("请联网搜索行业最新案例并扩写"));
-        assert!(!should_search("请基于文档扩写，不要联网搜索"));
-        assert!(!should_search(
+        let policy = SearchPolicyConfig::default();
+        assert!(policy.should_search("请联网搜索行业最新案例并扩写"));
+        assert!(!policy.should_search("请基于文档扩写，不要联网搜索"));
+        assert!(!policy.should_search(
             "Please refine this draft, do not search the web."
         ));
-        assert!(!should_search("只做语气润色，不要补充事实"));
-        assert!(should_search(
+        assert!(!policy.should_search("只做语气润色，不要补充事实"));
+        assert!(policy.should_search(
             "Please search latest market data and then expand."
         ));
+    }
+
+    #[test]
+    fn search_policy_is_case_insensitive() {
+        let policy = SearchPolicyConfig::default();
+        assert!(policy.should_search("LATEST data please"));
+        assert!(policy.should_search("SEARCH for more info"));
+        assert!(!policy.should_search("DO NOT SEARCH the web"));
+        assert!(!policy.should_search("NO SEARCH needed"));
     }
 
     #[test]

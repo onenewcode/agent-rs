@@ -1,6 +1,6 @@
 use std::{fs::File, io::Read, path::Path};
 
-use agent_core::{BlockKind, DocumentBlock, DocumentParser, ParsedDocument};
+use agent_core::{normalize_whitespace, BlockKind, DocumentBlock, DocumentParser, ParsedDocument};
 use tracing::{debug, info};
 
 use crate::error::DocxAgentError;
@@ -50,14 +50,41 @@ impl DocxDocumentParser {
 impl DocumentParser for DocxDocumentParser {
     fn parse_path(&self, path: &Path) -> Result<ParsedDocument, agent_core::BoxError> {
         info!(doc = %path.display(), "parsing DOCX document");
-        let file = File::open(path)?;
-        let mut archive = zip::ZipArchive::new(file)?;
+        let file = File::open(path).map_err(|e| {
+            std::io::Error::new(
+                e.kind(),
+                format!("failed to open DOCX file {}: {e}", path.display()),
+            )
+        })?;
+        let mut archive = zip::ZipArchive::new(file).map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "invalid ZIP archive at {}: {e}",
+                    path.display()
+                ),
+            )
+        })?;
         let mut xml = String::new();
         archive
-            .by_name("word/document.xml")?
+            .by_name("word/document.xml")
+            .map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!(
+                        "word/document.xml not found in {}: {e}",
+                        path.display()
+                    ),
+                )
+            })?
             .read_to_string(&mut xml)?;
 
-        let parsed = Self::parse_xml(&xml)?;
+        let parsed = Self::parse_xml(&xml).map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("failed to parse XML in {}: {e}", path.display()),
+            )
+        })?;
         info!(
             doc = %path.display(),
             title = parsed.title.as_deref().unwrap_or(""),
@@ -101,10 +128,6 @@ fn extract_paragraph_text(node: roxmltree::Node<'_, '_>) -> String {
     }
 
     normalize_whitespace(&merged)
-}
-
-fn normalize_whitespace(value: &str) -> String {
-    value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn heading_level(style: &str) -> Option<u8> {

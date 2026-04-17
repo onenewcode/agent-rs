@@ -1,4 +1,4 @@
-use agent_core::{FetchedSource, SearchBackend, SourceKind};
+use agent_core::{truncate_chars, FetchedSource, SearchBackend, SourceKind};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
@@ -108,10 +108,6 @@ fn truncate_for_log(value: &str) -> String {
     } else {
         truncated
     }
-}
-
-fn truncate_chars(value: &str, limit: usize) -> String {
-    value.chars().take(limit).collect()
 }
 
 fn to_fetched_source(result: TavilySearchResult, max_chars: usize) -> FetchedSource {

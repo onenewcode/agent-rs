@@ -1,4 +1,4 @@
-use agent_core::{FetchedSource, SourceKind, UrlFetcher};
+use agent_core::{normalize_whitespace, truncate_chars, FetchedSource, SourceKind, UrlFetcher};
 use async_trait::async_trait;
 use reqwest::header::CONTENT_TYPE;
 use scraper::{ElementRef, Html, Selector};
@@ -160,14 +160,6 @@ fn is_supported_html_content_type(content_type: &str) -> bool {
 
     media_type.eq_ignore_ascii_case("text/html")
         || media_type.eq_ignore_ascii_case("application/xhtml+xml")
-}
-
-fn normalize_whitespace(value: &str) -> String {
-    value.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-fn truncate_chars(value: &str, limit: usize) -> String {
-    value.chars().take(limit).collect()
 }
 
 #[cfg(test)]
