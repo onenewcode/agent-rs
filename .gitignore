@@ -7,3 +7,6 @@ GEMINI.md
 target/
 test_data/
 agent.toml
+.codex/
+.gemini/
+.claude/

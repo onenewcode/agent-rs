@@ -1,6 +1,0 @@
-{
-  "hooks": {
-    "pre_command": "python3 .harness/hooks/policy_hook.py PreToolUse claude",
-    "post_command": "python3 .harness/hooks/policy_hook.py PostToolUse claude"
-  }
-}
