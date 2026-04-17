@@ -15,26 +15,23 @@ pub struct TavilySearchClient {
 }
 
 impl TavilySearchClient {
-    pub fn new(api_key: &str, user_agent: &str, max_chars: usize) -> Result<Self, DocxAgentError> {
-        let client = reqwest::Client::builder().user_agent(user_agent).build()?;
-
-        Ok(Self {
+    #[must_use]
+    pub fn new(client: reqwest::Client, api_key: &str, max_chars: usize) -> Self {
+        Self {
             client,
             api_key: api_key.to_owned(),
             max_chars,
-        })
+        }
     }
-}
 
-#[async_trait]
-impl SearchBackend for TavilySearchClient {
-    async fn search(
+    pub async fn search(
         &self,
         query: &str,
         max_results: usize,
-    ) -> Result<Vec<FetchedSource>, agent_core::BoxError> {
+    ) -> Result<Vec<FetchedSource>, DocxAgentError> {
         let query_chars = query.chars().count();
         info!(query_chars, max_results, "starting Tavily search");
+
         let response = self
             .client
             .post(TAVILY_SEARCH_ENDPOINT)
@@ -53,6 +50,7 @@ impl SearchBackend for TavilySearchClient {
 
         let status = response.status();
         let body = response.text().await?;
+
         if !status.is_success() {
             warn!(query_chars, status = %status, "Tavily search request failed");
             debug!(
@@ -63,8 +61,7 @@ impl SearchBackend for TavilySearchClient {
             );
             return Err(DocxAgentError::Agent(format!(
                 "tavily search failed with status {status}"
-            ))
-            .into());
+            )));
         }
 
         let payload: TavilySearchResponse = serde_json::from_str(&body).map_err(|error| {
@@ -76,6 +73,7 @@ impl SearchBackend for TavilySearchClient {
             );
             DocxAgentError::Agent(format!("failed to parse Tavily response: {error}"))
         })?;
+
         let results: Vec<FetchedSource> = payload
             .results
             .into_iter()
@@ -88,6 +86,17 @@ impl SearchBackend for TavilySearchClient {
             "completed Tavily search"
         );
         Ok(results)
+    }
+}
+
+#[async_trait]
+impl SearchBackend for TavilySearchClient {
+    async fn search(
+        &self,
+        query: &str,
+        max_results: usize,
+    ) -> Result<Vec<FetchedSource>, agent_core::BoxError> {
+        self.search(query, max_results).await.map_err(Into::into)
     }
 }
 

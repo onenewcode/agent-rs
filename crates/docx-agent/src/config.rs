@@ -90,8 +90,8 @@ impl SearchPolicyConfig {
             "do not use internet",
             "don't use internet",
         ]
-        .iter()
-        .map(|s| (*s).to_owned())
+        .into_iter()
+        .map(String::from)
         .collect()
     }
 
@@ -100,8 +100,8 @@ impl SearchPolicyConfig {
             "搜索", "联网", "最新", "案例", "数据", "资料", "参考", "研究", "趋势", "现状",
             "latest", "current", "search", "research",
         ]
-        .iter()
-        .map(|s| (*s).to_owned())
+        .into_iter()
+        .map(String::from)
         .collect()
     }
 
@@ -208,5 +208,28 @@ mod tests {
     #[test]
     fn system_prompt_default_is_not_empty() {
         assert!(!super::SYSTEM_PROMPT_DEFAULT.is_empty());
+    }
+
+    #[test]
+    fn search_policy_uses_prompt_hints() {
+        let policy = SearchPolicyConfig::default();
+        assert!(policy.should_search("请联网搜索行业最新案例并扩写"));
+        assert!(!policy.should_search("请基于文档扩写，不要联网搜索"));
+        assert!(!policy.should_search(
+            "Please refine this draft, do not search the web."
+        ));
+        assert!(!policy.should_search("只做语气润色，不要补充事实"));
+        assert!(policy.should_search(
+            "Please search latest market data and then expand."
+        ));
+    }
+
+    #[test]
+    fn search_policy_is_case_insensitive() {
+        let policy = SearchPolicyConfig::default();
+        assert!(policy.should_search("LATEST data please"));
+        assert!(policy.should_search("SEARCH for more info"));
+        assert!(!policy.should_search("DO NOT SEARCH the web"));
+        assert!(!policy.should_search("NO SEARCH needed"));
     }
 }

@@ -11,6 +11,27 @@ const WORD_NAMESPACE: &str = "http://schemas.openxmlformats.org/wordprocessingml
 pub struct DocxDocumentParser;
 
 impl DocxDocumentParser {
+    pub fn parse(path: &Path) -> Result<ParsedDocument, DocxAgentError> {
+        info!(doc = %path.display(), "parsing DOCX document");
+
+        let file = File::open(path)?;
+        let mut archive = zip::ZipArchive::new(file)?;
+        let mut xml = String::new();
+        archive
+            .by_name("word/document.xml")?
+            .read_to_string(&mut xml)?;
+
+        let parsed = Self::parse_xml(&xml)?;
+        info!(
+            doc = %path.display(),
+            title = parsed.title.as_deref().unwrap_or(""),
+            blocks = parsed.blocks.len(),
+            "parsed DOCX document"
+        );
+        debug!(doc = %path.display(), xml_chars = xml.chars().count(), "loaded document xml");
+        Ok(parsed)
+    }
+
     fn parse_xml(xml: &str) -> Result<ParsedDocument, DocxAgentError> {
         let document = roxmltree::Document::parse(xml)?;
         let mut blocks = Vec::new();
@@ -49,50 +70,7 @@ impl DocxDocumentParser {
 
 impl DocumentParser for DocxDocumentParser {
     fn parse_path(&self, path: &Path) -> Result<ParsedDocument, agent_core::BoxError> {
-        info!(doc = %path.display(), "parsing DOCX document");
-        let file = File::open(path).map_err(|e| {
-            std::io::Error::new(
-                e.kind(),
-                format!("failed to open DOCX file {}: {e}", path.display()),
-            )
-        })?;
-        let mut archive = zip::ZipArchive::new(file).map_err(|e| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!(
-                    "invalid ZIP archive at {}: {e}",
-                    path.display()
-                ),
-            )
-        })?;
-        let mut xml = String::new();
-        archive
-            .by_name("word/document.xml")
-            .map_err(|e| {
-                std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    format!(
-                        "word/document.xml not found in {}: {e}",
-                        path.display()
-                    ),
-                )
-            })?
-            .read_to_string(&mut xml)?;
-
-        let parsed = Self::parse_xml(&xml).map_err(|e| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("failed to parse XML in {}: {e}", path.display()),
-            )
-        })?;
-        info!(
-            doc = %path.display(),
-            title = parsed.title.as_deref().unwrap_or(""),
-            blocks = parsed.blocks.len(),
-            "parsed DOCX document"
-        );
-        debug!(doc = %path.display(), xml_chars = xml.chars().count(), "loaded document xml");
-        Ok(parsed)
+        Self::parse(path).map_err(Into::into)
     }
 }
 

@@ -13,16 +13,12 @@ pub struct WebPageFetcher {
 }
 
 impl WebPageFetcher {
-    pub fn new(user_agent: &str, max_chars: usize) -> Result<Self, DocxAgentError> {
-        let client = reqwest::Client::builder().user_agent(user_agent).build()?;
-
-        Ok(Self { client, max_chars })
+    #[must_use]
+    pub fn new(client: reqwest::Client, max_chars: usize) -> Self {
+        Self { client, max_chars }
     }
-}
 
-#[async_trait]
-impl UrlFetcher for WebPageFetcher {
-    async fn fetch(&self, url: &str) -> Result<FetchedSource, agent_core::BoxError> {
+    pub async fn fetch_url(&self, url: &str) -> Result<FetchedSource, DocxAgentError> {
         info!(url, "fetching user-provided URL");
         let response = self.client.get(url).send().await?.error_for_status()?;
 
@@ -33,7 +29,7 @@ impl UrlFetcher for WebPageFetcher {
             && !is_supported_html_content_type(content_type)
         {
             warn!(url, content_type, "skipping unsupported URL content type");
-            return Err(DocxAgentError::UnsupportedContentType(content_type.to_owned()).into());
+            return Err(DocxAgentError::UnsupportedContentType(content_type.to_owned()));
         }
 
         let body = response.text().await?;
@@ -59,6 +55,13 @@ impl UrlFetcher for WebPageFetcher {
         );
 
         Ok(source)
+    }
+}
+
+#[async_trait]
+impl UrlFetcher for WebPageFetcher {
+    async fn fetch(&self, url: &str) -> Result<FetchedSource, agent_core::BoxError> {
+        self.fetch_url(url).await.map_err(Into::into)
     }
 }
 

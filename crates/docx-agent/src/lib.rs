@@ -3,7 +3,9 @@
 mod config;
 mod error;
 mod fetch;
+mod generation;
 mod parser;
+mod prompt;
 mod search;
 mod service;
 
