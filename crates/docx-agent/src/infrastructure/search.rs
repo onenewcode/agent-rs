@@ -1,4 +1,4 @@
-use agent_core::{FetchedSource, SearchBackend, SourceKind, truncate_chars};
+use agent_core::{BoxFuture, FetchedSource, SearchBackend, SourceKind, truncate_chars};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
@@ -89,12 +89,13 @@ impl TavilySearchClient {
 }
 
 impl SearchBackend for TavilySearchClient {
-    async fn search(
+    fn search(
         &self,
         query: &str,
         max_results: usize,
-    ) -> Result<Vec<FetchedSource>, agent_core::BoxError> {
-        self.search(query, max_results).await.map_err(Into::into)
+    ) -> BoxFuture<'_, Result<Vec<FetchedSource>, agent_core::BoxError>> {
+        let query = query.to_owned();
+        Box::pin(async move { self.search(&query, max_results).await.map_err(Into::into) })
     }
 }
 

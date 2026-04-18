@@ -1,8 +1,12 @@
 #![allow(clippy::missing_errors_doc)]
 
+use std::future::Future;
+use std::pin::Pin;
+
 use serde::{Deserialize, Serialize};
 
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
+pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BlockKind {
@@ -82,12 +86,15 @@ pub trait DocumentParser: Send + Sync {
 }
 
 pub trait SearchBackend: Send + Sync {
-    fn search(&self, query: &str, max_results: usize)
-    -> impl std::future::Future<Output = Result<Vec<FetchedSource>, BoxError>> + Send;
+    fn search(
+        &self,
+        query: &str,
+        max_results: usize,
+    ) -> BoxFuture<'_, Result<Vec<FetchedSource>, BoxError>>;
 }
 
 pub trait UrlFetcher: Send + Sync {
-    fn fetch(&self, url: &str) -> impl std::future::Future<Output = Result<FetchedSource, BoxError>> + Send;
+    fn fetch(&self, url: &str) -> BoxFuture<'_, Result<FetchedSource, BoxError>>;
 }
 
 #[must_use]
@@ -101,5 +108,5 @@ pub fn normalize_whitespace(value: &str) -> String {
 }
 
 pub trait ExpansionRuntime: Send + Sync {
-    fn expand(&self, request: ExpansionRequest) -> impl std::future::Future<Output = Result<ExpansionResult, BoxError>> + Send;
+    fn expand(&self, request: ExpansionRequest) -> BoxFuture<'_, Result<ExpansionResult, BoxError>>;
 }

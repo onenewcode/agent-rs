@@ -1,6 +1,9 @@
 use std::{path::Path, sync::Arc, time::Duration};
 
-use agent_core::{ExpansionRequest, ExpansionResult, ExpansionRuntime, FetchedSource};
+use agent_core::{
+    BoxFuture, ExpansionRequest, ExpansionResult, ExpansionRuntime, FetchedSource, SearchBackend,
+    UrlFetcher,
+};
 use tokio::sync::Semaphore;
 use tokio::time::timeout;
 use tracing::{info, warn};
@@ -10,14 +13,16 @@ use crate::{
     domain,
     error::DocxAgentError,
     infrastructure::{
-        docx::DocxDocumentParser, fetch::WebPageFetcher, llm, search::TavilySearchClient,
+        cache::InMemoryCacheFetcher, docx::DocxDocumentParser, fetch::WebPageFetcher, llm,
+        search::TavilySearchClient,
     },
 };
 
 pub struct DocxExpansionService {
     config: DocxAgentConfig,
     http: reqwest::Client,
-    search_client: Option<TavilySearchClient>,
+    search_client: Option<Arc<dyn SearchBackend>>,
+    fetcher: Arc<dyn UrlFetcher>,
 }
 
 impl DocxExpansionService {
@@ -31,21 +36,30 @@ impl DocxExpansionService {
             .user_agent(&config.fetch.user_agent)
             .build()?;
 
-        let search_client = config.search.api_key.as_deref().map(|api_key| {
-            TavilySearchClient::new(http.clone(), api_key, config.limits.source_chars)
-        });
+        let search_client: Option<Arc<dyn SearchBackend>> =
+            config.search.api_key.as_deref().map(|api_key| {
+                Arc::new(TavilySearchClient::new(
+                    http.clone(),
+                    api_key,
+                    config.limits.source_chars,
+                )) as Arc<dyn SearchBackend>
+            });
+
+        let base_fetcher = WebPageFetcher::new(http.clone(), config.limits.source_chars);
+        let fetcher: Arc<dyn UrlFetcher> = Arc::new(InMemoryCacheFetcher::new(base_fetcher));
 
         info!(
             search_enabled = search_client.is_some(),
             source_char_limit = config.limits.source_chars,
             document_char_limit = config.limits.document_chars,
-            "initialized docx expansion service"
+            "initialized docx expansion service with caching"
         );
 
         Ok(Self {
             config,
             http,
             search_client,
+            fetcher,
         })
     }
 
@@ -86,19 +100,21 @@ impl DocxExpansionService {
             return Ok(Vec::new());
         }
 
-        let fetcher = WebPageFetcher::new(self.http.clone(), self.config.limits.source_chars);
         let semaphore = Arc::new(Semaphore::new(self.config.fetch.concurrency_limit));
         let mut set = tokio::task::JoinSet::new();
         let timeout_dur = Duration::from_secs(self.config.fetch.timeout_secs);
 
         for url in urls {
-            let f = fetcher.clone();
+            let f = Arc::clone(&self.fetcher);
             let u = url.clone();
             let sem = Arc::clone(&semaphore);
             set.spawn(async move {
-                let _permit = sem.acquire().await.map_err(|e| DocxAgentError::Agent(Box::new(e)))?;
-                match timeout(timeout_dur, f.fetch_url(&u)).await {
-                    Ok(res) => res,
+                let _permit = sem
+                    .acquire()
+                    .await
+                    .map_err(|e| DocxAgentError::Agent(Box::new(e)))?;
+                match timeout(timeout_dur, f.fetch(&u)).await {
+                    Ok(res) => res.map_err(DocxAgentError::Agent),
                     Err(_) => Err(DocxAgentError::ResearchError {
                         kind: "fetch_timeout",
                         message: format!("fetching {u} timed out after {}s", timeout_dur.as_secs()),
@@ -138,7 +154,15 @@ impl DocxExpansionService {
             return Ok(None);
         }
 
-        let query = domain::build_search_query(request);
+        let agent = llm::build_agent(&self.http, &self.config)?;
+        let query = llm::generate_optimized_search_query(
+            &agent,
+            request.document.title.as_deref(),
+            &request.prompt,
+            &self.config.llm.model,
+        )
+        .await?;
+
         let Some(backend) = self.search_client.as_ref() else {
             tracing::warn!("prompt requested search but no search API key is configured");
             return Ok(None);
@@ -185,30 +209,50 @@ impl DocxExpansionService {
 }
 
 impl ExpansionRuntime for DocxExpansionService {
-    async fn expand(
+    fn expand(
         &self,
         request: ExpansionRequest,
-    ) -> Result<ExpansionResult, agent_core::BoxError> {
-        let mut sources = self.collect_user_sources(&request.user_urls).await?;
-        let mut search_queries = Vec::new();
+    ) -> BoxFuture<'_, Result<ExpansionResult, agent_core::BoxError>> {
+        let global_timeout = Duration::from_secs(self.config.limits.global_timeout_secs);
 
-        if let Some((query, results)) = self.collect_search_sources(&request).await? {
-            search_queries.push(query);
-            sources.extend(results);
-        }
+        Box::pin(async move {
+            timeout(global_timeout, async {
+                let (user_sources_res, search_sources_res) = tokio::join!(
+                    self.collect_user_sources(&request.user_urls),
+                    self.collect_search_sources(&request)
+                );
 
-        info!(
-            search_queries = search_queries.len(),
-            sources = sources.len(),
-            "collected supporting sources"
-        );
+                let mut sources = user_sources_res?;
+                let mut search_queries = Vec::new();
 
-        let content = self.generate_content(&request, &sources).await?;
+                if let Some((query, results)) = search_sources_res? {
+                    search_queries.push(query);
+                    sources.extend(results);
+                }
 
-        Ok(ExpansionResult {
-            content,
-            search_queries,
-            sources,
+                info!(
+                    search_queries = search_queries.len(),
+                    sources = sources.len(),
+                    "collected supporting sources"
+                );
+
+                let content = self.generate_content(&request, &sources).await?;
+
+                Ok::<_, DocxAgentError>(ExpansionResult {
+                    content,
+                    search_queries,
+                    sources,
+                })
+            })
+            .await
+            .map_err(|_| DocxAgentError::ResearchError {
+                kind: "global_timeout",
+                message: format!(
+                    "total expansion process timed out after {}s",
+                    global_timeout.as_secs()
+                ),
+            })?
+            .map_err(Into::into)
         })
     }
 }

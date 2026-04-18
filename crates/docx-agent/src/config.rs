@@ -45,6 +45,14 @@ impl SearchConfig {
 pub struct LimitsConfig {
     pub document_chars: usize,
     pub source_chars: usize,
+    #[serde(default = "LimitsConfig::default_global_timeout_secs")]
+    pub global_timeout_secs: u64,
+}
+
+impl LimitsConfig {
+    fn default_global_timeout_secs() -> u64 {
+        180
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

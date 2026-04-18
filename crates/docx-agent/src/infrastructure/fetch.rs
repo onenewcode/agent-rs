@@ -1,4 +1,6 @@
-use agent_core::{FetchedSource, SourceKind, UrlFetcher, normalize_whitespace, truncate_chars};
+use agent_core::{
+    BoxFuture, FetchedSource, SourceKind, UrlFetcher, normalize_whitespace, truncate_chars,
+};
 use reqwest::header::CONTENT_TYPE;
 use scraper::{ElementRef, Html, Selector};
 use tracing::{info, warn};
@@ -60,8 +62,9 @@ impl WebPageFetcher {
 }
 
 impl UrlFetcher for WebPageFetcher {
-    async fn fetch(&self, url: &str) -> Result<FetchedSource, agent_core::BoxError> {
-        self.fetch_url(url).await.map_err(Into::into)
+    fn fetch(&self, url: &str) -> BoxFuture<'_, Result<FetchedSource, agent_core::BoxError>> {
+        let url = url.to_owned();
+        Box::pin(async move { self.fetch_url(&url).await.map_err(Into::into) })
     }
 }
 

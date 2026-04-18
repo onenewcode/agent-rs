@@ -80,6 +80,26 @@ pub(crate) async fn generate_with_retry(
     ))
 }
 
+pub(crate) async fn generate_optimized_search_query(
+    agent: &impl Prompt,
+    title: Option<&str>,
+    prompt: &str,
+    model: &str,
+) -> Result<String, DocxAgentError> {
+    let title_context = title.map_or("".to_owned(), |t| format!("Document title: {t}\n"));
+    let generation_prompt = format!(
+        "{title_context}User intent: {prompt}\n\nBased on the document title and user intent, generate ONE concise, effective search query to find supporting materials. Output ONLY the query text without quotes or explanations.",
+    );
+
+    info!(model, "generating optimized search query via LLM");
+
+    let query = generate_with_retry(agent, &generation_prompt, model, 1).await?;
+    let trimmed = query.trim().trim_matches('"').to_owned();
+
+    info!(query = %trimmed, "LLM generated optimized search query");
+    Ok(trimmed)
+}
+
 fn is_retryable_error(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
     RETRYABLE_ERROR_PATTERNS
