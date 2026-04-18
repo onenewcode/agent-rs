@@ -13,7 +13,7 @@ use crate::{
     domain,
     error::DocxAgentError,
     infrastructure::{
-        cache::InMemoryCacheFetcher, docx::DocxDocumentParser, fetch::WebPageFetcher, llm,
+        cache::DiskCacheFetcher, docx::DocxDocumentParser, fetch::WebPageFetcher, llm,
         search::TavilySearchClient,
     },
 };
@@ -41,18 +41,23 @@ impl DocxExpansionService {
                 Arc::new(TavilySearchClient::new(
                     http.clone(),
                     api_key,
-                    config.limits.source_chars,
+                    config.limits.source_tokens * 4,
                 )) as Arc<dyn SearchBackend>
             });
 
-        let base_fetcher = WebPageFetcher::new(http.clone(), config.limits.source_chars);
-        let fetcher: Arc<dyn UrlFetcher> = Arc::new(InMemoryCacheFetcher::new(base_fetcher));
+        let base_fetcher = WebPageFetcher::new(http.clone(), config.limits.source_tokens * 4);
+        let fetcher: Arc<dyn UrlFetcher> = Arc::new(DiskCacheFetcher::new(
+            base_fetcher,
+            &config.fetch.cache_dir,
+            config.fetch.max_cache_age_days,
+        ));
 
         info!(
             search_enabled = search_client.is_some(),
-            source_char_limit = config.limits.source_chars,
-            document_char_limit = config.limits.document_chars,
-            "initialized docx expansion service with caching"
+            source_token_limit = config.limits.source_tokens,
+            document_token_limit = config.limits.document_tokens,
+            cache_dir = %config.fetch.cache_dir,
+            "initialized docx expansion service with persistent caching"
         );
 
         Ok(Self {
@@ -155,13 +160,20 @@ impl DocxExpansionService {
         }
 
         let agent = llm::build_agent(&self.http, &self.config)?;
-        let query = llm::generate_optimized_search_query(
+        let query = match llm::generate_optimized_search_query(
             &agent,
             request.document.title.as_deref(),
             &request.prompt,
             &self.config.llm.model,
         )
-        .await?;
+        .await
+        {
+            Ok(q) => q,
+            Err(e) => {
+                warn!(error = %e, "LLM search query generation failed, using fallback");
+                domain::build_fallback_search_query(request)
+            }
+        };
 
         let Some(backend) = self.search_client.as_ref() else {
             tracing::warn!("prompt requested search but no search API key is configured");
@@ -189,13 +201,40 @@ impl DocxExpansionService {
         sources: &[FetchedSource],
     ) -> Result<String, DocxAgentError> {
         let agent = llm::build_agent(&self.http, &self.config)?;
-        let prompt_text =
-            domain::render_generation_prompt(request, sources, self.config.limits.document_chars);
+
+        // Phase 1: Generate Outline
+        let outline_prompt = domain::render_outline_prompt(
+            self.config.outline_template(),
+            request,
+            sources,
+            self.config.limits.document_tokens,
+            self.config.limits.source_tokens,
+        );
+
+        info!(model = %self.config.llm.model, "generating expansion outline");
+        let outline = llm::generate_with_retry(
+            &agent,
+            &outline_prompt,
+            &self.config.llm.model,
+            self.config.max_generation_attempts(),
+        )
+        .await?;
+
+        // Phase 2: Generate Final Content
+        let prompt_text = domain::render_generation_prompt(
+            self.config.generation_template(),
+            request,
+            sources,
+            &outline,
+            self.config.limits.document_tokens,
+            self.config.limits.source_tokens,
+        );
+
         info!(
             model = %self.config.llm.model,
-            prompt_chars = prompt_text.chars().count(),
+            prompt_tokens = prompt_text.len() / 4, // Rough estimate for logging
             sources = sources.len(),
-            "sending generation request to OpenRouter"
+            "sending final generation request to OpenRouter"
         );
 
         llm::generate_with_retry(

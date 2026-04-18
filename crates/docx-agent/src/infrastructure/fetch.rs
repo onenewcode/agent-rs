@@ -80,17 +80,83 @@ fn select_first_text(document: &Html, selector: &str) -> Option<String> {
 fn extract_body_text(document: &Html) -> Option<String> {
     let selector = Selector::parse("body").ok()?;
     let body = document.select(&selector).next()?;
-    let mut raw = String::new();
-    collect_body_text(body, &mut raw);
-    let normalized = normalize_whitespace(&raw);
-    if normalized.is_empty() {
-        None
+
+    let mut blocks = Vec::new();
+    find_content_blocks(body, &mut blocks);
+
+    // Score blocks based on text length and link density
+    let high_density_blocks: Vec<String> = blocks
+        .into_iter()
+        .filter(|block| {
+            let total_len = block.text.len();
+            let link_len = block.link_text_len;
+            let density = total_len as f32 / (link_len as f32 + 1.0);
+
+            // Heuristic: Keep blocks with substantial text and low link ratio
+            total_len > 40 && density > 2.0
+        })
+        .map(|block| block.text)
+        .collect();
+
+    if high_density_blocks.is_empty() {
+        // Fallback to simple extraction if density filtering was too aggressive
+        let mut raw = String::new();
+        collect_raw_text(body, &mut raw);
+        let normalized = normalize_whitespace(&raw);
+        return if normalized.is_empty() { None } else { Some(normalized) };
+    }
+
+    Some(normalize_whitespace(&high_density_blocks.join(" ")))
+}
+
+struct TextBlock {
+    text: String,
+    link_text_len: usize,
+}
+
+fn find_content_blocks(element: ElementRef<'_>, out: &mut Vec<TextBlock>) {
+    if is_non_content_element(element.value().name()) {
+        return;
+    }
+
+    if is_block_element(element.value().name()) {
+        let mut text = String::new();
+        let mut link_len = 0;
+        collect_block_stats(element, &mut text, &mut link_len);
+        let trimmed = text.trim().to_owned();
+        if !trimmed.is_empty() {
+            out.push(TextBlock {
+                text: trimmed,
+                link_text_len: link_len,
+            });
+        }
     } else {
-        Some(normalized)
+        for child in element.children() {
+            if let Some(child_element) = ElementRef::wrap(child) {
+                find_content_blocks(child_element, out);
+            }
+        }
     }
 }
 
-fn collect_body_text(element: ElementRef<'_>, out: &mut String) {
+fn collect_block_stats(element: ElementRef<'_>, text_out: &mut String, link_len_out: &mut usize) {
+    let is_link = element.value().name() == "a";
+
+    for child in element.children() {
+        if let Some(text) = child.value().as_text() {
+            text_out.push_str(text);
+            if is_link {
+                *link_len_out += text.len();
+            }
+            continue;
+        }
+        if let Some(child_element) = ElementRef::wrap(child) {
+            collect_block_stats(child_element, text_out, link_len_out);
+        }
+    }
+}
+
+fn collect_raw_text(element: ElementRef<'_>, out: &mut String) {
     if is_non_content_element(element.value().name()) {
         return;
     }
@@ -106,12 +172,8 @@ fn collect_body_text(element: ElementRef<'_>, out: &mut String) {
             continue;
         }
         if let Some(child_element) = ElementRef::wrap(child) {
-            collect_body_text(child_element, out);
+            collect_raw_text(child_element, out);
         }
-    }
-
-    if is_block && !out.ends_with(char::is_whitespace) {
-        out.push(' ');
     }
 }
 
@@ -155,7 +217,20 @@ fn is_block_element(tag: &str) -> bool {
 }
 
 fn is_non_content_element(tag: &str) -> bool {
-    matches!(tag, "script" | "style" | "noscript")
+    matches!(
+        tag,
+        "script"
+            | "style"
+            | "noscript"
+            | "nav"
+            | "header"
+            | "footer"
+            | "aside"
+            | "menu"
+            | "form"
+            | "iframe"
+            | "button"
+    )
 }
 
 fn is_supported_html_content_type(content_type: &str) -> bool {

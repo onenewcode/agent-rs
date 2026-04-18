@@ -1,16 +1,41 @@
 [llm]
 provider = "openrouter"
-model = "openai/gpt-4.1-mini"
+model = "openai/gpt-4o-mini"
 api_key = "replace-with-openrouter-api-key"
 
 [search]
 provider = "tavily"
 api_key = "replace-with-tavily-api-key"
 max_results = 5
+timeout_secs = 30
 
 [limits]
-document_chars = 12000
-source_chars = 4000
+document_tokens = 4000
+source_tokens = 2000
+global_timeout_secs = 180
 
 [fetch]
 user_agent = "agent-rs-docx-agent/0.1"
+concurrency_limit = 5
+timeout_secs = 20
+cache_dir = ".agent-cache"
+max_cache_age_days = 7
+
+# Optional: Override the system prompt
+# system_prompt = "你是 Word 文档扩写助手..."
+
+# Optional: Override the outline template
+# outline_template = """
+# 任务:
+# {prompt}
+# ...
+# """
+
+# Optional: Override the generation template
+# generation_template = """
+# 任务:
+# {prompt}
+# ...
+# {outline}
+# ...
+# """

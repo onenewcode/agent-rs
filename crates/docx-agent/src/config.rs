@@ -6,6 +6,35 @@ use tracing::info;
 use crate::error::DocxAgentError;
 
 pub(crate) const SYSTEM_PROMPT_DEFAULT: &str = r"你是 Word 文档扩写助手。仅基于给定 DOCX、用户要求、URL/搜索材料写作；材料不足时说明假设与边界，不得编造事实或最新数据。输出中文 Markdown，不加引用编号；优先沿用原文主题、术语与结构，必要时补充合理小节。";
+pub(crate) const GENERATION_TEMPLATE_DEFAULT: &str = r"任务:
+{prompt}
+
+文档:
+{document}
+
+用户 URL:
+{user_urls}
+
+外部材料:
+{sources}
+
+扩写大纲:
+{outline}
+
+请基于以上大纲和材料直接输出最终中文 Markdown。";
+pub(crate) const OUTLINE_TEMPLATE_DEFAULT: &str = r"任务:
+{prompt}
+
+文档:
+{document}
+
+用户 URL:
+{user_urls}
+
+外部材料:
+{sources}
+
+请基于现有文档和外部材料，为扩写任务生成一个详细的中文 Markdown 大纲。";
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct DocxAgentConfig {
@@ -16,6 +45,8 @@ pub struct DocxAgentConfig {
     #[serde(default)]
     pub search_policy: SearchPolicyConfig,
     pub system_prompt: Option<String>,
+    pub generation_template: Option<String>,
+    pub outline_template: Option<String>,
     pub max_generation_attempts: Option<usize>,
 }
 
@@ -43,8 +74,8 @@ impl SearchConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct LimitsConfig {
-    pub document_chars: usize,
-    pub source_chars: usize,
+    pub document_tokens: usize,
+    pub source_tokens: usize,
     #[serde(default = "LimitsConfig::default_global_timeout_secs")]
     pub global_timeout_secs: u64,
 }
@@ -62,6 +93,10 @@ pub struct FetchConfig {
     pub concurrency_limit: usize,
     #[serde(default = "FetchConfig::default_timeout_secs")]
     pub timeout_secs: u64,
+    #[serde(default = "FetchConfig::default_cache_dir")]
+    pub cache_dir: String,
+    #[serde(default = "FetchConfig::default_max_cache_age_days")]
+    pub max_cache_age_days: u64,
 }
 
 impl FetchConfig {
@@ -71,6 +106,14 @@ impl FetchConfig {
 
     fn default_timeout_secs() -> u64 {
         20
+    }
+
+    fn default_cache_dir() -> String {
+        ".agent-cache".to_owned()
+    }
+
+    fn default_max_cache_age_days() -> u64 {
+        7
     }
 }
 
@@ -198,6 +241,18 @@ impl DocxAgentConfig {
         self.system_prompt
             .as_deref()
             .unwrap_or(SYSTEM_PROMPT_DEFAULT)
+    }
+
+    pub(crate) fn generation_template(&self) -> &str {
+        self.generation_template
+            .as_deref()
+            .unwrap_or(GENERATION_TEMPLATE_DEFAULT)
+    }
+
+    pub(crate) fn outline_template(&self) -> &str {
+        self.outline_template
+            .as_deref()
+            .unwrap_or(OUTLINE_TEMPLATE_DEFAULT)
     }
 
     pub(crate) fn max_generation_attempts(&self) -> usize {
