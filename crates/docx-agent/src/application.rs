@@ -1,7 +1,6 @@
 use std::path::Path;
 
 use agent_core::{ExpansionRequest, ExpansionResult, ExpansionRuntime, FetchedSource};
-use async_trait::async_trait;
 use tracing::info;
 
 use crate::{
@@ -74,7 +73,7 @@ impl DocxExpansionService {
             user_urls: user_urls.to_vec(),
         })
         .await
-        .map_err(|e| DocxAgentError::Agent(e.to_string()))
+        .map_err(Into::into)
     }
 
     async fn collect_user_sources(
@@ -82,9 +81,17 @@ impl DocxExpansionService {
         urls: &[String],
     ) -> Result<Vec<FetchedSource>, DocxAgentError> {
         let fetcher = WebPageFetcher::new(self.http.clone(), self.config.limits.source_chars);
-        let mut sources = Vec::with_capacity(urls.len());
+        let mut set = tokio::task::JoinSet::new();
+
         for url in urls {
-            sources.push(fetcher.fetch_url(url).await?);
+            let f = fetcher.clone();
+            let u = url.clone();
+            set.spawn(async move { f.fetch_url(&u).await });
+        }
+
+        let mut sources = Vec::with_capacity(urls.len());
+        while let Some(res) = set.join_next().await {
+            sources.push(res.map_err(|e| DocxAgentError::Agent(Box::new(e)))??);
         }
         Ok(sources)
     }
@@ -146,7 +153,6 @@ impl DocxExpansionService {
     }
 }
 
-#[async_trait]
 impl ExpansionRuntime for DocxExpansionService {
     async fn expand(
         &self,

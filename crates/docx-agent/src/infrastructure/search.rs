@@ -1,5 +1,4 @@
 use agent_core::{FetchedSource, SearchBackend, SourceKind, truncate_chars};
-use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
@@ -59,9 +58,9 @@ impl TavilySearchClient {
                 response_preview = %truncate_for_log(&body),
                 "Tavily failure response preview"
             );
-            return Err(DocxAgentError::Agent(format!(
-                "tavily search failed with status {status}"
-            )));
+            return Err(DocxAgentError::Agent(
+                format!("tavily search failed with status {status}").into(),
+            ));
         }
 
         let payload: TavilySearchResponse = serde_json::from_str(&body).map_err(|error| {
@@ -71,7 +70,7 @@ impl TavilySearchClient {
                 response_preview = %truncate_for_log(&body),
                 "Tavily parse failure response preview"
             );
-            DocxAgentError::Agent(format!("failed to parse Tavily response: {error}"))
+            DocxAgentError::Agent(format!("failed to parse Tavily response: {error}").into())
         })?;
 
         let results: Vec<FetchedSource> = payload
@@ -89,7 +88,6 @@ impl TavilySearchClient {
     }
 }
 
-#[async_trait]
 impl SearchBackend for TavilySearchClient {
     async fn search(
         &self,

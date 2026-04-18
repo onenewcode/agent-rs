@@ -1,5 +1,4 @@
 use agent_core::{FetchedSource, SourceKind, UrlFetcher, normalize_whitespace, truncate_chars};
-use async_trait::async_trait;
 use reqwest::header::CONTENT_TYPE;
 use scraper::{ElementRef, Html, Selector};
 use tracing::{info, warn};
@@ -60,7 +59,6 @@ impl WebPageFetcher {
     }
 }
 
-#[async_trait]
 impl UrlFetcher for WebPageFetcher {
     async fn fetch(&self, url: &str) -> Result<FetchedSource, agent_core::BoxError> {
         self.fetch_url(url).await.map_err(Into::into)

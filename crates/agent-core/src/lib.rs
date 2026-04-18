@@ -1,6 +1,5 @@
 #![allow(clippy::missing_errors_doc)]
 
-use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
@@ -77,19 +76,18 @@ pub struct ExpansionResult {
     pub sources: Vec<FetchedSource>,
 }
 
+
 pub trait DocumentParser: Send + Sync {
     fn parse_path(&self, path: &std::path::Path) -> Result<ParsedDocument, BoxError>;
 }
 
-#[async_trait]
 pub trait SearchBackend: Send + Sync {
-    async fn search(&self, query: &str, max_results: usize)
-    -> Result<Vec<FetchedSource>, BoxError>;
+    fn search(&self, query: &str, max_results: usize)
+    -> impl std::future::Future<Output = Result<Vec<FetchedSource>, BoxError>> + Send;
 }
 
-#[async_trait]
 pub trait UrlFetcher: Send + Sync {
-    async fn fetch(&self, url: &str) -> Result<FetchedSource, BoxError>;
+    fn fetch(&self, url: &str) -> impl std::future::Future<Output = Result<FetchedSource, BoxError>> + Send;
 }
 
 #[must_use]
@@ -102,7 +100,6 @@ pub fn normalize_whitespace(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-#[async_trait]
 pub trait ExpansionRuntime: Send + Sync {
-    async fn expand(&self, request: ExpansionRequest) -> Result<ExpansionResult, BoxError>;
+    fn expand(&self, request: ExpansionRequest) -> impl std::future::Future<Output = Result<ExpansionResult, BoxError>> + Send;
 }

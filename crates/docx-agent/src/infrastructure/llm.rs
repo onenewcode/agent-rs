@@ -29,7 +29,7 @@ pub(crate) fn build_agent(
         .http_client(http.clone())
         .build()
         .map_err(|error| {
-            DocxAgentError::Agent(format!("failed to build OpenRouter client: {error}"))
+            DocxAgentError::Agent(format!("failed to build OpenRouter client: {error}").into())
         })?;
 
     Ok(client
@@ -70,13 +70,13 @@ pub(crate) async fn generate_with_retry(
                     continue;
                 }
 
-                return Err(DocxAgentError::Agent(message));
+                return Err(DocxAgentError::Agent(message.into()));
             }
         }
     }
 
     Err(DocxAgentError::Agent(
-        "OpenRouter generation exhausted retries".to_owned(),
+        "OpenRouter generation exhausted retries".to_owned().into(),
     ))
 }
 

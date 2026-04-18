@@ -6,7 +6,6 @@ edition.workspace = true
 
 [dependencies]
 agent-core = { path = "../agent-core" }
-async-trait.workspace = true
 reqwest.workspace = true
 rig.workspace = true
 roxmltree.workspace = true

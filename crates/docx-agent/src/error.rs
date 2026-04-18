@@ -29,5 +29,5 @@ pub enum DocxAgentError {
     #[error("document is empty after parsing")]
     EmptyDocument,
     #[error("agent execution failed: {0}")]
-    Agent(String),
+    Agent(#[from] agent_core::BoxError),
 }
