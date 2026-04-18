@@ -1,7 +1,9 @@
-use std::path::Path;
+use std::{path::Path, sync::Arc, time::Duration};
 
 use agent_core::{ExpansionRequest, ExpansionResult, ExpansionRuntime, FetchedSource};
-use tracing::info;
+use tokio::sync::Semaphore;
+use tokio::time::timeout;
+use tracing::{info, warn};
 
 use crate::{
     config::DocxAgentConfig,
@@ -80,18 +82,42 @@ impl DocxExpansionService {
         &self,
         urls: &[String],
     ) -> Result<Vec<FetchedSource>, DocxAgentError> {
+        if urls.is_empty() {
+            return Ok(Vec::new());
+        }
+
         let fetcher = WebPageFetcher::new(self.http.clone(), self.config.limits.source_chars);
+        let semaphore = Arc::new(Semaphore::new(self.config.fetch.concurrency_limit));
         let mut set = tokio::task::JoinSet::new();
+        let timeout_dur = Duration::from_secs(self.config.fetch.timeout_secs);
 
         for url in urls {
             let f = fetcher.clone();
             let u = url.clone();
-            set.spawn(async move { f.fetch_url(&u).await });
+            let sem = Arc::clone(&semaphore);
+            set.spawn(async move {
+                let _permit = sem.acquire().await.map_err(|e| DocxAgentError::Agent(Box::new(e)))?;
+                match timeout(timeout_dur, f.fetch_url(&u)).await {
+                    Ok(res) => res,
+                    Err(_) => Err(DocxAgentError::ResearchError {
+                        kind: "fetch_timeout",
+                        message: format!("fetching {u} timed out after {}s", timeout_dur.as_secs()),
+                    }),
+                }
+            });
         }
 
         let mut sources = Vec::with_capacity(urls.len());
         while let Some(res) = set.join_next().await {
-            sources.push(res.map_err(|e| DocxAgentError::Agent(Box::new(e)))??);
+            match res {
+                Ok(Ok(source)) => sources.push(source),
+                Ok(Err(e)) => {
+                    warn!(error = %e, "failed to fetch user URL, skipping");
+                }
+                Err(e) => {
+                    warn!(error = %e, "join error during URL fetch");
+                }
+            }
         }
         Ok(sources)
     }
@@ -118,9 +144,14 @@ impl DocxExpansionService {
             return Ok(None);
         };
 
-        let results = backend
-            .search(&query, self.config.search.max_results)
-            .await?;
+        let timeout_dur = Duration::from_secs(self.config.search.timeout_secs);
+        let results = match timeout(timeout_dur, backend.search(&query, self.config.search.max_results)).await {
+            Ok(res) => res?,
+            Err(_) => {
+                warn!(query, "search timed out after {}s", timeout_dur.as_secs());
+                return Ok(None);
+            }
+        };
 
         if results.is_empty() {
             return Ok(None);

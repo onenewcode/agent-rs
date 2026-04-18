@@ -31,6 +31,14 @@ pub struct SearchConfig {
     pub provider: String,
     pub api_key: Option<String>,
     pub max_results: usize,
+    #[serde(default = "SearchConfig::default_timeout_secs")]
+    pub timeout_secs: u64,
+}
+
+impl SearchConfig {
+    fn default_timeout_secs() -> u64 {
+        30
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -42,6 +50,20 @@ pub struct LimitsConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct FetchConfig {
     pub user_agent: String,
+    #[serde(default = "FetchConfig::default_concurrency_limit")]
+    pub concurrency_limit: usize,
+    #[serde(default = "FetchConfig::default_timeout_secs")]
+    pub timeout_secs: u64,
+}
+
+impl FetchConfig {
+    fn default_concurrency_limit() -> usize {
+        5
+    }
+
+    fn default_timeout_secs() -> u64 {
+        20
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
