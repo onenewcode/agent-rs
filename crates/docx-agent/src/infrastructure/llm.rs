@@ -3,7 +3,8 @@ use std::time::Duration;
 use rig::{client::CompletionClient, completion::Prompt, providers::openrouter};
 use tracing::{info, warn};
 
-use crate::{config::LlmConfig, error::DocxAgentError};
+use agent_core::config::LlmConfig;
+use crate::error::DocxAgentError;
 
 const RETRYABLE_ERROR_PATTERNS: &[&str] = &[
     "429",

@@ -3,9 +3,10 @@ use std::{path::PathBuf, sync::Arc};
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use docx_agent::DocxExpansionService;
+use docx_agent::steps::{ResearchStep, GenerationStep, EvaluationStep, RefinementStep};
 use evaluator_agent::EvaluatorService;
 use orchestrator::AgentOrchestrator;
-use agent_core::ExpansionRuntime;
+use agent_core::{ExpansionRuntime, Pipeline};
 use rig::client::CompletionClient;
 use tracing::{info, error};
 use tracing_subscriber::EnvFilter;
@@ -59,16 +60,16 @@ async fn expand(args: ExpandArgs) -> anyhow::Result<()> {
         "starting document expansion"
     );
 
-    // 1. Initialize the Generator (docx-agent)
-    let generator_service = Arc::new(DocxExpansionService::from_config_path(&config_path)
+    // 1. Initialize core services
+    let expansion_service = Arc::new(DocxExpansionService::from_config_path(&config_path)
         .with_context(|| format!("failed to load config {}", config_path.display()))?);
     
-    let config = generator_service.config();
+    let config = expansion_service.config().clone();
     let http = reqwest::Client::builder()
         .user_agent(&config.fetch.user_agent)
         .build()?;
 
-    // 2. Initialize the Evaluator (evaluator-agent)
+    // 2. Initialize the Evaluator
     let eval_client = rig::providers::openrouter::Client::builder()
         .api_key(config.evaluator.llm.api_key.as_str())
         .http_client(http.clone())
@@ -86,31 +87,40 @@ async fn expand(args: ExpandArgs) -> anyhow::Result<()> {
         config.evaluator.max_attempts(),
     ));
 
-    // 3. Initialize the Orchestrator
+    // 3. Construct the Pipeline
+    let mut pipeline = Pipeline::new();
+    pipeline.add_step(Box::new(ResearchStep::new(
+        expansion_service.clone(), 
+        config.limits.global_timeout_secs
+    )));
+    pipeline.add_step(Box::new(GenerationStep::new(expansion_service.clone())));
+    pipeline.add_step(Box::new(EvaluationStep::new(
+        evaluator_service.clone(), 
+        config.limits.min_score
+    )));
+
+    // 4. Initialize the Orchestrator
+    let refiner = Arc::new(RefinementStep::new(config.evaluator.refinement_template().to_owned()));
     let orchestrator = AgentOrchestrator::new(
-        generator_service.clone(),
-        evaluator_service,
-        generator_service.clone(),
-        config.limits.min_score,
+        pipeline,
+        Some(refiner),
         config.evaluator.max_attempts(),
-        config.evaluator.refinement_template().to_owned(),
     );
 
-    // 4. Run the Pipeline
-    let result = generator_service.parse_document(&args.doc)
-        .map_err(|e| anyhow::anyhow!("failed to parse document: {e}"))
-        .map(|document| {
-            agent_core::ExpansionRequest {
-                prompt: args.prompt.clone(),
-                document,
-                user_urls: args.urls.clone(),
-            }
-        })?;
+    // 5. Run the Pipeline
+    let document = expansion_service.parse_document(&args.doc)
+        .map_err(|e| anyhow::anyhow!("failed to parse document: {e}"))?;
 
-    let result = orchestrator.expand(result).await
+    let request = agent_core::ExpansionRequest {
+        prompt: args.prompt.clone(),
+        document,
+        user_urls: args.urls.clone(),
+    };
+
+    let result = orchestrator.expand(request).await
         .with_context(|| format!("failed to expand document {}", args.doc.display()))?;
 
-    // 5. Handle Results
+    // 6. Handle Results
     if result.is_qualified {
         info!(
             score = result.score,

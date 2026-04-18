@@ -6,6 +6,8 @@ use std::pin::Pin;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub mod config;
+
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -170,4 +172,55 @@ pub trait ExpansionRuntime: Send + Sync {
         request: ExpansionRequest,
         research: ResearchResult,
     ) -> BoxFuture<'_, Result<ExpansionResult, ExpansionError>>;
+}
+
+pub trait Step: Send + Sync {
+    fn name(&self) -> &str;
+    fn execute<'a>(
+        &self,
+        request: &'a mut ExpansionRequest,
+        current_result: Option<ExpansionResult>,
+        research: Option<ResearchResult>,
+    ) -> BoxFuture<'a, Result<(Option<ExpansionResult>, Option<ResearchResult>), ExpansionError>>;
+}
+
+pub struct Pipeline {
+    pub steps: Vec<Box<dyn Step>>,
+}
+
+impl Pipeline {
+    #[must_use]
+    pub fn new() -> Self {
+        Self { steps: Vec::new() }
+    }
+
+    pub fn add_step(&mut self, step: Box<dyn Step>) {
+        self.steps.push(step);
+    }
+
+    pub async fn run(
+        &self,
+        request: &mut ExpansionRequest,
+    ) -> Result<ExpansionResult, ExpansionError> {
+        let mut current_result: Option<ExpansionResult> = None;
+        let mut current_research: Option<ResearchResult> = None;
+
+        for step in &self.steps {
+            let (next_result, next_research) = step
+                .execute(request, current_result.take(), current_research.take())
+                .await?;
+            current_result = next_result;
+            current_research = next_research;
+        }
+
+        current_result.ok_or_else(|| {
+            ExpansionError::Internal("Pipeline finished without a result".to_owned())
+        })
+    }
+}
+
+impl Default for Pipeline {
+    fn default() -> Self {
+        Self::new()
+    }
 }

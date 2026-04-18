@@ -2,6 +2,7 @@ use std::{fs, path::Path};
 
 use serde::Deserialize;
 use tracing::info;
+use agent_core::config::{LlmConfig, SearchConfig, LimitsConfig};
 
 use crate::error::DocxAgentError;
 
@@ -101,67 +102,6 @@ pub struct EvaluatorPromptsConfig {
     pub system: Option<String>,
     pub evaluation: Option<String>,
     pub refinement: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct LlmConfig {
-    pub provider: String,
-    pub model: String,
-    pub api_key: String,
-    #[serde(default = "LlmConfig::default_input_cost")]
-    pub input_cost_per_1m: f64,
-    #[serde(default = "LlmConfig::default_output_cost")]
-    pub output_cost_per_1m: f64,
-}
-
-impl LlmConfig {
-    fn default_input_cost() -> f64 {
-        0.15
-    }
-
-    fn default_output_cost() -> f64 {
-        0.60
-    }
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct SearchConfig {
-    pub provider: String,
-    pub api_key: Option<String>,
-    pub max_results: usize,
-    #[serde(default = "SearchConfig::default_timeout_secs")]
-    pub timeout_secs: u64,
-}
-
-impl SearchConfig {
-    fn default_timeout_secs() -> u64 {
-        30
-    }
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct LimitsConfig {
-    pub document_tokens: usize,
-    pub source_tokens: usize,
-    pub max_total_tokens: Option<usize>,
-    #[serde(default = "LimitsConfig::default_global_timeout_secs")]
-    pub global_timeout_secs: u64,
-    #[serde(default = "LimitsConfig::default_min_score")]
-    pub min_score: u8,
-}
-
-impl LimitsConfig {
-    fn default_global_timeout_secs() -> u64 {
-        180
-    }
-
-    fn default_min_score() -> u8 {
-        80
-    }
-
-    pub fn max_total_tokens(&self) -> usize {
-        self.max_total_tokens.unwrap_or(128_000)
-    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -378,40 +318,4 @@ fn validate_secret(field: &'static str, value: &str) -> Result<(), DocxAgentErro
     }
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::SearchPolicyConfig;
-
-    #[test]
-    fn search_policy_defaults_are_populated() {
-        let policy = SearchPolicyConfig::default();
-        assert_eq!(policy.negations.len(), 25);
-        assert_eq!(policy.hints.len(), 14);
-    }
-
-    #[test]
-    fn system_prompt_default_is_not_empty() {
-        assert!(!super::SYSTEM_PROMPT_DEFAULT.is_empty());
-    }
-
-    #[test]
-    fn search_policy_uses_prompt_hints() {
-        let policy = SearchPolicyConfig::default();
-        assert!(policy.should_search("请联网搜索行业最新案例并扩写"));
-        assert!(!policy.should_search("请基于文档扩写，不要联网搜索"));
-        assert!(!policy.should_search("Please refine this draft, do not search the web."));
-        assert!(!policy.should_search("只做语气润色，不要补充事实"));
-        assert!(policy.should_search("Please search latest market data and then expand."));
-    }
-
-    #[test]
-    fn search_policy_is_case_insensitive() {
-        let policy = SearchPolicyConfig::default();
-        assert!(policy.should_search("LATEST data please"));
-        assert!(policy.should_search("SEARCH for more info"));
-        assert!(!policy.should_search("DO NOT SEARCH the web"));
-        assert!(!policy.should_search("NO SEARCH needed"));
-    }
 }
