@@ -1,4 +1,4 @@
-use agent_core::{truncate_chars, FetchedSource, SearchBackend, SourceKind};
+use agent_core::{FetchedSource, SearchBackend, SourceKind, truncate_chars};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};

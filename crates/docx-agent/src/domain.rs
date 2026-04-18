@@ -1,6 +1,6 @@
-use agent_core::{truncate_chars, ExpansionRequest, FetchedSource};
+use agent_core::{ExpansionRequest, FetchedSource, truncate_chars};
 
-pub(super) fn build_search_query(request: &ExpansionRequest) -> String {
+pub(crate) fn build_search_query(request: &ExpansionRequest) -> String {
     let mut parts = Vec::new();
     if let Some(title) = &request.document.title {
         parts.push(title.clone());
@@ -11,13 +11,12 @@ pub(super) fn build_search_query(request: &ExpansionRequest) -> String {
     parts.join(" ")
 }
 
-pub(super) fn render_generation_prompt(
+pub(crate) fn render_generation_prompt(
     request: &ExpansionRequest,
     sources: &[FetchedSource],
     max_document_chars: usize,
 ) -> String {
-    let document_markdown =
-        truncate_chars(&request.document.render_markdown(), max_document_chars);
+    let document_markdown = truncate_chars(&request.document.render_markdown(), max_document_chars);
     let source_sections = if sources.is_empty() {
         "无".to_owned()
     } else {

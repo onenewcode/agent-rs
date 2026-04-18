@@ -1,4 +1,4 @@
-use agent_core::{normalize_whitespace, truncate_chars, FetchedSource, SourceKind, UrlFetcher};
+use agent_core::{FetchedSource, SourceKind, UrlFetcher, normalize_whitespace, truncate_chars};
 use async_trait::async_trait;
 use reqwest::header::CONTENT_TYPE;
 use scraper::{ElementRef, Html, Selector};
@@ -29,7 +29,9 @@ impl WebPageFetcher {
             && !is_supported_html_content_type(content_type)
         {
             warn!(url, content_type, "skipping unsupported URL content type");
-            return Err(DocxAgentError::UnsupportedContentType(content_type.to_owned()));
+            return Err(DocxAgentError::UnsupportedContentType(
+                content_type.to_owned(),
+            ));
         }
 
         let body = response.text().await?;

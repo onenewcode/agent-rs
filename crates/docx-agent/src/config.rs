@@ -215,13 +215,9 @@ mod tests {
         let policy = SearchPolicyConfig::default();
         assert!(policy.should_search("请联网搜索行业最新案例并扩写"));
         assert!(!policy.should_search("请基于文档扩写，不要联网搜索"));
-        assert!(!policy.should_search(
-            "Please refine this draft, do not search the web."
-        ));
+        assert!(!policy.should_search("Please refine this draft, do not search the web."));
         assert!(!policy.should_search("只做语气润色，不要补充事实"));
-        assert!(policy.should_search(
-            "Please search latest market data and then expand."
-        ));
+        assert!(policy.should_search("Please search latest market data and then expand."));
     }
 
     #[test]

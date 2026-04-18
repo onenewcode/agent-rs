@@ -20,7 +20,7 @@ const RETRYABLE_ERROR_PATTERNS: &[&str] = &[
     "deadline exceeded",
 ];
 
-pub(super) fn build_agent(
+pub(crate) fn build_agent(
     http: &reqwest::Client,
     config: &DocxAgentConfig,
 ) -> Result<impl Prompt, DocxAgentError> {
@@ -38,7 +38,7 @@ pub(super) fn build_agent(
         .build())
 }
 
-pub(super) async fn generate_with_retry(
+pub(crate) async fn generate_with_retry(
     agent: &impl Prompt,
     prompt: &str,
     model: &str,

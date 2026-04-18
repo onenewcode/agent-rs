@@ -1,6 +1,6 @@
 use std::{fs::File, io::Read, path::Path};
 
-use agent_core::{normalize_whitespace, BlockKind, DocumentBlock, DocumentParser, ParsedDocument};
+use agent_core::{BlockKind, DocumentBlock, DocumentParser, ParsedDocument, normalize_whitespace};
 use tracing::{debug, info};
 
 use crate::error::DocxAgentError;

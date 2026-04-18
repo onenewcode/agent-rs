@@ -1,12 +1,16 @@
 use std::path::Path;
 
-use agent_core::{ExpansionRequest, ExpansionResult, ExpansionRuntime};
+use agent_core::{ExpansionRequest, ExpansionResult, ExpansionRuntime, FetchedSource};
 use async_trait::async_trait;
 use tracing::info;
 
 use crate::{
-    config::DocxAgentConfig, error::DocxAgentError, fetch::WebPageFetcher,
-    generation, parser::DocxDocumentParser, prompt, search::TavilySearchClient,
+    config::DocxAgentConfig,
+    domain,
+    error::DocxAgentError,
+    infrastructure::{
+        docx::DocxDocumentParser, fetch::WebPageFetcher, llm, search::TavilySearchClient,
+    },
 };
 
 pub struct DocxExpansionService {
@@ -18,15 +22,17 @@ pub struct DocxExpansionService {
 impl DocxExpansionService {
     pub fn from_config_path(path: &Path) -> Result<Self, DocxAgentError> {
         let config = DocxAgentConfig::from_path(path)?;
+        Self::from_config(config)
+    }
+
+    pub fn from_config(config: DocxAgentConfig) -> Result<Self, DocxAgentError> {
         let http = reqwest::Client::builder()
             .user_agent(&config.fetch.user_agent)
             .build()?;
 
-        let search_client = config
-            .search
-            .api_key
-            .as_deref()
-            .map(|api_key| TavilySearchClient::new(http.clone(), api_key, config.limits.source_chars));
+        let search_client = config.search.api_key.as_deref().map(|api_key| {
+            TavilySearchClient::new(http.clone(), api_key, config.limits.source_chars)
+        });
 
         info!(
             search_enabled = search_client.is_some(),
@@ -71,10 +77,10 @@ impl DocxExpansionService {
         .map_err(|e| DocxAgentError::Agent(e.to_string()))
     }
 
-    async fn fetch_user_urls(
+    async fn collect_user_sources(
         &self,
         urls: &[String],
-    ) -> Result<Vec<agent_core::FetchedSource>, DocxAgentError> {
+    ) -> Result<Vec<FetchedSource>, DocxAgentError> {
         let fetcher = WebPageFetcher::new(self.http.clone(), self.config.limits.source_chars);
         let mut sources = Vec::with_capacity(urls.len());
         for url in urls {
@@ -83,10 +89,10 @@ impl DocxExpansionService {
         Ok(sources)
     }
 
-    async fn search_if_needed(
+    async fn collect_search_sources(
         &self,
         request: &ExpansionRequest,
-    ) -> Result<Option<(String, Vec<agent_core::FetchedSource>)>, DocxAgentError> {
+    ) -> Result<Option<(String, Vec<FetchedSource>)>, DocxAgentError> {
         let search_requested = self.config.search_policy.should_search(&request.prompt);
         info!(
             search_requested,
@@ -99,7 +105,7 @@ impl DocxExpansionService {
             return Ok(None);
         }
 
-        let query = prompt::build_search_query(request);
+        let query = domain::build_search_query(request);
         let Some(backend) = self.search_client.as_ref() else {
             tracing::warn!("prompt requested search but no search API key is configured");
             return Ok(None);
@@ -118,11 +124,11 @@ impl DocxExpansionService {
     async fn generate_content(
         &self,
         request: &ExpansionRequest,
-        sources: &[agent_core::FetchedSource],
+        sources: &[FetchedSource],
     ) -> Result<String, DocxAgentError> {
-        let agent = generation::build_agent(&self.http, &self.config)?;
+        let agent = llm::build_agent(&self.http, &self.config)?;
         let prompt_text =
-            prompt::render_generation_prompt(request, sources, self.config.limits.document_chars);
+            domain::render_generation_prompt(request, sources, self.config.limits.document_chars);
         info!(
             model = %self.config.llm.model,
             prompt_chars = prompt_text.chars().count(),
@@ -130,7 +136,7 @@ impl DocxExpansionService {
             "sending generation request to OpenRouter"
         );
 
-        generation::generate_with_retry(
+        llm::generate_with_retry(
             &agent,
             &prompt_text,
             &self.config.llm.model,
@@ -146,10 +152,10 @@ impl ExpansionRuntime for DocxExpansionService {
         &self,
         request: ExpansionRequest,
     ) -> Result<ExpansionResult, agent_core::BoxError> {
-        let mut sources = self.fetch_user_urls(&request.user_urls).await?;
+        let mut sources = self.collect_user_sources(&request.user_urls).await?;
         let mut search_queries = Vec::new();
 
-        if let Some((query, results)) = self.search_if_needed(&request).await? {
+        if let Some((query, results)) = self.collect_search_sources(&request).await? {
             search_queries.push(query);
             sources.extend(results);
         }

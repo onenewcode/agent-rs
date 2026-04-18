@@ -1,17 +1,14 @@
 #![allow(clippy::missing_errors_doc)]
 
+mod application;
 mod config;
+mod domain;
 mod error;
-mod fetch;
-mod generation;
-mod parser;
-mod prompt;
-mod search;
-mod service;
+mod infrastructure;
 
+pub use application::DocxExpansionService;
 pub use config::{DocxAgentConfig, SearchPolicyConfig};
 pub use error::DocxAgentError;
-pub use fetch::WebPageFetcher;
-pub use parser::DocxDocumentParser;
-pub use search::TavilySearchClient;
-pub use service::DocxExpansionService;
+pub use infrastructure::docx::DocxDocumentParser;
+pub use infrastructure::fetch::WebPageFetcher;
+pub use infrastructure::search::TavilySearchClient;
