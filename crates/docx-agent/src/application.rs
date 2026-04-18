@@ -1,8 +1,8 @@
 use std::{path::Path, sync::Arc, time::Duration};
 
 use agent_core::{
-    BoxFuture, ExpansionRequest, ExpansionResult, ExpansionRuntime, FetchedSource, SearchBackend,
-    UrlFetcher,
+    BoxFuture, ExpansionRequest, ExpansionResult, ExpansionRuntime, FetchedSource, ResearchRuntime,
+    SearchBackend, UrlFetcher,
 };
 use tokio::sync::Semaphore;
 use tokio::time::timeout;
@@ -52,8 +52,12 @@ impl DocxExpansionService {
             config.fetch.max_cache_age_days,
         ));
 
-        let llm_client: Arc<dyn agent_core::LlmBackend> =
-            Arc::new(llm::build_agent(http, config.clone())?);
+        let llm_client: Arc<dyn agent_core::LlmBackend> = Arc::new(llm::build_agent(
+            http,
+            config.generator.llm.clone(),
+            config.generator.system_prompt().to_owned(),
+            config.generator.max_attempts(),
+        )?);
 
         info!(
             search_enabled = search_client.is_some(),
@@ -84,6 +88,11 @@ impl DocxExpansionService {
             fetcher,
             llm_client,
         }
+    }
+
+    #[must_use]
+    pub fn config(&self) -> &DocxAgentConfig {
+        &self.config
     }
 
     pub fn parse_document(
@@ -192,7 +201,7 @@ impl DocxExpansionService {
             &**llm,
             request.document.title.as_deref(),
             &request.prompt,
-            &self.config,
+            &self.config.generator.llm.model,
         )
         .await
         {
@@ -204,12 +213,13 @@ impl DocxExpansionService {
         };
 
         let timeout_dur = Duration::from_secs(self.config.search.timeout_secs);
-        let results = match timeout(timeout_dur, backend.search(&query, self.config.search.max_results)).await {
-            Ok(res) => res?,
-            Err(_) => {
-                warn!(query, "search timed out after {}s", timeout_dur.as_secs());
-                return Ok(None);
-            }
+        let results = if let Ok(res) =
+            timeout(timeout_dur, backend.search(&query, self.config.search.max_results)).await
+        {
+            res?
+        } else {
+            warn!(query, "search timed out after {}s", timeout_dur.as_secs());
+            return Ok(None);
         };
 
         if results.is_empty() {
@@ -233,18 +243,18 @@ impl DocxExpansionService {
 
         // Phase 1: Generate Outline
         let outline_prompt = domain::render_outline_prompt(
-            self.config.outline_template(),
+            self.config.generator.outline_template(),
             request,
             sources,
             &budgeter,
         );
 
-        info!(model = %self.config.llm.model, "generating expansion outline");
+        info!(model = %self.config.generator.llm.model, "generating expansion outline");
         let outline = agent.prompt(&outline_prompt).await.map_err(DocxAgentError::Agent)?;
 
         // Phase 2: Generate Final Content
         let prompt_text = domain::render_generation_prompt(
-            self.config.generation_template(),
+            self.config.generator.generation_template(),
             request,
             sources,
             &outline,
@@ -252,7 +262,7 @@ impl DocxExpansionService {
         );
 
         info!(
-            model = %self.config.llm.model,
+            model = %self.config.generator.llm.model,
             prompt_tokens = domain::count_tokens(&prompt_text),
             sources = sources.len(),
             "sending final generation request"
@@ -262,7 +272,63 @@ impl DocxExpansionService {
     }
 }
 
+impl ResearchRuntime for DocxExpansionService {
+    fn research(
+        &self,
+        request: ExpansionRequest,
+    ) -> BoxFuture<'_, Result<agent_core::ResearchResult, agent_core::ExpansionError>> {
+        Box::pin(async move {
+            let (user_sources_res, search_sources_res) = tokio::join!(
+                self.collect_user_sources(&request.user_urls),
+                self.collect_search_sources(&request)
+            );
+
+            let mut sources = user_sources_res.map_err(|e| {
+                agent_core::ExpansionError::Internal(format!("User sources collection failed: {e}"))
+            })?;
+            let mut search_queries = Vec::new();
+
+            if let Some((query, results)) = search_sources_res.map_err(|e| {
+                agent_core::ExpansionError::Internal(format!("Search sources collection failed: {e}"))
+            })? {
+                search_queries.push(query);
+                sources.extend(results);
+            }
+
+            Ok(agent_core::ResearchResult {
+                search_queries,
+                sources,
+            })
+        })
+    }
+}
+
 impl ExpansionRuntime for DocxExpansionService {
+    fn generate(
+        &self,
+        request: ExpansionRequest,
+        research: agent_core::ResearchResult,
+    ) -> BoxFuture<'_, Result<ExpansionResult, agent_core::ExpansionError>> {
+        Box::pin(async move {
+            let content = self
+                .generate_content(&request, &research.sources)
+                .await
+                .map_err(|e| match e {
+                    DocxAgentError::Agent(inner) => inner,
+                    _ => agent_core::ExpansionError::Internal(e.to_string()),
+                })?;
+
+            Ok(ExpansionResult {
+                content,
+                search_queries: research.search_queries,
+                sources: research.sources,
+                score: 0,
+                is_qualified: false,
+                evaluation_reason: None,
+            })
+        })
+    }
+
     fn expand(
         &self,
         request: ExpansionRequest,
@@ -271,41 +337,8 @@ impl ExpansionRuntime for DocxExpansionService {
 
         Box::pin(async move {
             timeout(global_timeout, async {
-                let (user_sources_res, search_sources_res) = tokio::join!(
-                    self.collect_user_sources(&request.user_urls),
-                    self.collect_search_sources(&request)
-                );
-
-                let mut sources = user_sources_res.map_err(|e| {
-                    agent_core::ExpansionError::Internal(format!("User sources collection failed: {e}"))
-                })?;
-                let mut search_queries = Vec::new();
-
-                if let Some((query, results)) = search_sources_res.map_err(|e| {
-                    agent_core::ExpansionError::Internal(format!("Search sources collection failed: {e}"))
-                })? {
-                    search_queries.push(query);
-                    sources.extend(results);
-                }
-
-                info!(
-                    search_queries = search_queries.len(),
-                    sources = sources.len(),
-                    "collected supporting sources"
-                );
-
-                let content = self.generate_content(&request, &sources).await.map_err(|e| {
-                    match e {
-                        DocxAgentError::Agent(inner) => inner,
-                        _ => agent_core::ExpansionError::Internal(e.to_string()),
-                    }
-                })?;
-
-                Ok::<_, agent_core::ExpansionError>(ExpansionResult {
-                    content,
-                    search_queries,
-                    sources,
-                })
+                let research = self.research(request.clone()).await?;
+                self.generate(request, research).await
             })
             .await
             .map_err(|_| {
@@ -367,7 +400,12 @@ mod tests {
             &self,
             _prompt: &str,
         ) -> agent_core::BoxFuture<'_, Result<String, agent_core::ExpansionError>> {
-            let res = self.responses.lock().unwrap().remove(0);
+            let mut lock = self.responses.lock().unwrap();
+            let res = if lock.is_empty() {
+                "Fallback response".to_owned()
+            } else {
+                lock.remove(0)
+            };
             Box::pin(async move { Ok(res) })
         }
     }
@@ -375,10 +413,21 @@ mod tests {
     #[tokio::test]
     async fn test_expansion_pipeline_orchestration() -> Result<(), agent_core::ExpansionError> {
         let config_toml = r#"
-            [llm]
+            [generator.llm]
             provider = "openrouter"
             model = "openai/gpt-4o-mini"
             api_key = "test-key"
+
+            [generator.prompts]
+            # No overrides
+
+            [evaluator.llm]
+            provider = "openrouter"
+            model = "openai/gpt-4o-mini"
+            api_key = "test-key"
+
+            [evaluator.prompts]
+            # No overrides
 
             [search]
             provider = "tavily"

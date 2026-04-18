@@ -94,6 +94,7 @@ fn extract_body_text(document: &Html) -> Option<String> {
         .filter(|block| {
             let total_len = block.text.len();
             let link_len = block.link_text_len;
+            #[allow(clippy::cast_precision_loss)]
             let density = total_len as f32 / (link_len as f32 + 1.0);
 
             // Heuristic: Keep blocks with substantial text and low link ratio

@@ -41,7 +41,7 @@ impl DocxDocumentParser {
             .find(|node| is_word_node(node, "body"))
             .ok_or(DocxAgentError::EmptyDocument)?;
 
-        for node in body.children().filter(|n| n.is_element()) {
+        for node in body.children().filter(roxmltree::Node::is_element) {
             if is_word_node(&node, "p") {
                 let text = extract_paragraph_text(node);
                 if text.is_empty() {
@@ -56,13 +56,13 @@ impl DocxDocumentParser {
                     kind: block_kind,
                     text,
                 });
-            } else if is_word_node(&node, "tbl") {
-                if let Some(table_markdown) = extract_table_markdown(node) {
-                    blocks.push(DocumentBlock {
-                        kind: BlockKind::Table,
-                        text: table_markdown,
-                    });
-                }
+            } else if is_word_node(&node, "tbl")
+                && let Some(table_markdown) = extract_table_markdown(node)
+            {
+                blocks.push(DocumentBlock {
+                    kind: BlockKind::Table,
+                    text: table_markdown,
+                });
             }
         }
 
