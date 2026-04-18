@@ -1,0 +1,9 @@
+[package]
+name = "orchestrator"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+agent-core = { path = "../agent-core" }
+tokio.workspace = true
+tracing.workspace = true

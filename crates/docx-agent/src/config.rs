@@ -5,8 +5,8 @@ use tracing::info;
 
 use crate::error::DocxAgentError;
 
-pub(crate) const SYSTEM_PROMPT_DEFAULT: &str = r"你是 Word 文档扩写助手。仅基于给定 DOCX、用户要求、URL/搜索材料写作；材料不足时说明假设与边界，不得编造事实或最新数据。输出中文 Markdown，不加引用编号；优先沿用原文主题、术语与结构，必要时补充合理小节。";
-pub(crate) const GENERATION_TEMPLATE_DEFAULT: &str = r"任务:
+pub const SYSTEM_PROMPT_DEFAULT: &str = r"你是 Word 文档扩写助手。仅基于给定 DOCX、用户要求、URL/搜索材料写作；材料不足时说明假设与边界，不得编造事实或最新数据。输出中文 Markdown，不加引用编号；优先沿用原文主题、术语与结构，必要时补充合理小节。";
+pub const GENERATION_TEMPLATE_DEFAULT: &str = r"任务:
 {prompt}
 
 文档:
@@ -22,7 +22,7 @@ pub(crate) const GENERATION_TEMPLATE_DEFAULT: &str = r"任务:
 {outline}
 
 请基于以上大纲和材料直接输出最终中文 Markdown。";
-pub(crate) const OUTLINE_TEMPLATE_DEFAULT: &str = r"任务:
+pub const OUTLINE_TEMPLATE_DEFAULT: &str = r"任务:
 {prompt}
 
 文档:
@@ -35,19 +35,72 @@ pub(crate) const OUTLINE_TEMPLATE_DEFAULT: &str = r"任务:
 {sources}
 
 请基于现有文档和外部材料，为扩写任务生成一个详细的中文 Markdown 大纲。";
+pub const EVALUATION_TEMPLATE_DEFAULT: &str = r"你是一位严苛的文档评审专家。请对以下扩写内容进行评分。
+
+任务要求:
+{prompt}
+
+生成的扩写内容:
+{content}
+
+外部参考资料:
+{sources}
+
+请基于提供的参考资料核对生成内容的正确性和时效性。
+
+请输出一个 JSON 对象，包含以下字段：
+- score: 0 到 100 之间的整数分数。
+- reason: 评分理由，包括对准确性、专业性和逻辑性的具体评价。
+
+请仅输出有效的 JSON，不要包含 Markdown 代码块标签或其他文字。";
+pub const REFINEMENT_TEMPLATE_DEFAULT: &str = r"任务要求:
+{prompt}
+
+之前生成的扩写内容:
+{content}
+
+专家评分意见:
+{reason}
+
+请根据专家的意见对扩写内容进行优化 and 补充，直接输出最终优化后的中文 Markdown。";
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct DocxAgentConfig {
-    pub llm: LlmConfig,
+    pub generator: GeneratorConfig,
+    pub evaluator: EvaluatorConfig,
     pub search: SearchConfig,
     pub limits: LimitsConfig,
     pub fetch: FetchConfig,
     #[serde(default)]
     pub search_policy: SearchPolicyConfig,
-    pub system_prompt: Option<String>,
-    pub generation_template: Option<String>,
-    pub outline_template: Option<String>,
-    pub max_generation_attempts: Option<usize>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct GeneratorConfig {
+    pub llm: LlmConfig,
+    pub prompts: GeneratorPromptsConfig,
+    pub max_attempts: Option<usize>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct GeneratorPromptsConfig {
+    pub system: Option<String>,
+    pub generation: Option<String>,
+    pub outline: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct EvaluatorConfig {
+    pub llm: LlmConfig,
+    pub prompts: EvaluatorPromptsConfig,
+    pub max_attempts: Option<usize>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct EvaluatorPromptsConfig {
+    pub system: Option<String>,
+    pub evaluation: Option<String>,
+    pub refinement: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -93,11 +146,17 @@ pub struct LimitsConfig {
     pub max_total_tokens: Option<usize>,
     #[serde(default = "LimitsConfig::default_global_timeout_secs")]
     pub global_timeout_secs: u64,
+    #[serde(default = "LimitsConfig::default_min_score")]
+    pub min_score: u8,
 }
 
 impl LimitsConfig {
     fn default_global_timeout_secs() -> u64 {
         180
+    }
+
+    fn default_min_score() -> u8 {
+        80
     }
 
     pub fn max_total_tokens(&self) -> usize {
@@ -197,7 +256,8 @@ impl SearchPolicyConfig {
         .collect()
     }
 
-    pub(crate) fn should_search(&self, prompt: &str) -> bool {
+    #[must_use]
+    pub fn should_search(&self, prompt: &str) -> bool {
         let lower = prompt.to_ascii_lowercase();
         if self
             .negations
@@ -223,22 +283,32 @@ impl DocxAgentConfig {
         config.validate()?;
         info!(
             config = %path.display(),
-            llm_provider = %config.llm.provider,
-            llm_model = %config.llm.model,
+            generator_model = %config.generator.llm.model,
+            evaluator_model = %config.evaluator.llm.model,
             search_provider = %config.search.provider,
-            search_enabled = config.search.api_key.is_some(),
             "loaded agent configuration"
         );
         Ok(config)
     }
 
     pub(crate) fn validate(&mut self) -> Result<(), DocxAgentError> {
-        if self.llm.provider != "openrouter" {
+        // Validate Generator LLM
+        if self.generator.llm.provider != "openrouter" {
             return Err(DocxAgentError::UnsupportedProvider {
-                kind: "llm",
-                provider: self.llm.provider.clone(),
+                kind: "generator.llm",
+                provider: self.generator.llm.provider.clone(),
             });
         }
+        validate_secret("generator.llm.api_key", &self.generator.llm.api_key)?;
+
+        // Validate Evaluator LLM
+        if self.evaluator.llm.provider != "openrouter" {
+            return Err(DocxAgentError::UnsupportedProvider {
+                kind: "evaluator.llm",
+                provider: self.evaluator.llm.provider.clone(),
+            });
+        }
+        validate_secret("evaluator.llm.api_key", &self.evaluator.llm.api_key)?;
 
         if self.search.provider != "tavily" {
             return Err(DocxAgentError::UnsupportedProvider {
@@ -247,35 +317,47 @@ impl DocxAgentConfig {
             });
         }
 
-        validate_secret("llm.api_key", &self.llm.api_key)?;
-
         if let Some(api_key) = &self.search.api_key {
             validate_secret("search.api_key", api_key)?;
         }
 
         Ok(())
     }
+}
 
-    pub(crate) fn system_prompt(&self) -> &str {
-        self.system_prompt
-            .as_deref()
-            .unwrap_or(SYSTEM_PROMPT_DEFAULT)
+impl GeneratorConfig {
+    pub fn system_prompt(&self) -> &str {
+        self.prompts.system.as_deref().unwrap_or(SYSTEM_PROMPT_DEFAULT)
     }
 
-    pub(crate) fn generation_template(&self) -> &str {
-        self.generation_template
-            .as_deref()
-            .unwrap_or(GENERATION_TEMPLATE_DEFAULT)
+    pub fn generation_template(&self) -> &str {
+        self.prompts.generation.as_deref().unwrap_or(GENERATION_TEMPLATE_DEFAULT)
     }
 
-    pub(crate) fn outline_template(&self) -> &str {
-        self.outline_template
-            .as_deref()
-            .unwrap_or(OUTLINE_TEMPLATE_DEFAULT)
+    pub fn outline_template(&self) -> &str {
+        self.prompts.outline.as_deref().unwrap_or(OUTLINE_TEMPLATE_DEFAULT)
     }
 
-    pub(crate) fn max_generation_attempts(&self) -> usize {
-        self.max_generation_attempts.unwrap_or(3)
+    pub fn max_attempts(&self) -> usize {
+        self.max_attempts.unwrap_or(3)
+    }
+}
+
+impl EvaluatorConfig {
+    pub fn system_prompt(&self) -> &str {
+        self.prompts.system.as_deref().unwrap_or(SYSTEM_PROMPT_DEFAULT)
+    }
+
+    pub fn evaluation_template(&self) -> &str {
+        self.prompts.evaluation.as_deref().unwrap_or(EVALUATION_TEMPLATE_DEFAULT)
+    }
+
+    pub fn refinement_template(&self) -> &str {
+        self.prompts.refinement.as_deref().unwrap_or(REFINEMENT_TEMPLATE_DEFAULT)
+    }
+
+    pub fn max_attempts(&self) -> usize {
+        self.max_attempts.unwrap_or(3)
     }
 }
 

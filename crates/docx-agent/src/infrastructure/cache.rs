@@ -63,31 +63,29 @@ impl<F: UrlFetcher> UrlFetcher for DiskCacheFetcher<F> {
                     false
                 };
 
-                if is_valid {
-                    if let Ok(content) = fs::read_to_string(&path).await {
-                        if let Ok(source) = serde_json::from_str::<FetchedSource>(&content) {
-                            info!(url, path = %path.display(), "cache hit for disk fetcher");
-                            return Ok(source);
-                        }
-                    }
-                } else {
+                if is_valid
+                    && let Ok(content) = fs::read_to_string(&path).await
+                    && let Ok(source) = serde_json::from_str::<FetchedSource>(&content)
+                {
+                    info!(url, path = %path.display(), "cache hit for disk fetcher");
+                    return Ok(source);
+                } else if !is_valid {
                     info!(url, path = %path.display(), "cache expired or invalid, refetching");
                 }
             }
 
             let source = self.inner.fetch(&url).await?;
 
-            if let Ok(()) = fs::create_dir_all(&cache_dir).await {
-                if let Ok(content) = serde_json::to_string(&source) {
-                    if let Err(e) = fs::write(&path, content).await {
-                        warn!(
-                            url,
-                            path = %path.display(),
-                            error = %e,
-                            "failed to write cache file"
-                        );
-                    }
-                }
+            if let Ok(()) = fs::create_dir_all(&cache_dir).await
+                && let Ok(content) = serde_json::to_string(&source)
+                && let Err(e) = fs::write(&path, content).await
+            {
+                warn!(
+                    url,
+                    path = %path.display(),
+                    error = %e,
+                    "failed to write cache file"
+                );
             }
 
             Ok(source)
@@ -163,7 +161,7 @@ mod tests {
 
         // 3. Manually backdate the cache file to make it stale (2 days old)
         let cache_path = fetcher.cache_path(url);
-        let stale_time = SystemTime::now() - Duration::from_secs(2 * 24 * 3600);
+        let stale_time = SystemTime::now() - Duration::from_hours(48);
         filetime::set_file_mtime(&cache_path, filetime::FileTime::from_system_time(stale_time))?;
 
         // 4. Fetch again (cache expired, should refetch)

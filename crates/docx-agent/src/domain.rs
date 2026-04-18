@@ -11,7 +11,7 @@ fn get_tokenizer() -> &'static CoreBPE {
 
 pub(crate) fn truncate_tokens(text: &str, max_tokens: usize) -> String {
     if max_tokens == 0 {
-        return "".to_owned();
+        return String::new();
     }
     let bpe = get_tokenizer();
     let tokens = bpe.encode_with_special_tokens(text);
@@ -55,30 +55,12 @@ impl ContextBudgeter {
         }
 
         // Allocate 50% to document, 50% to external sources
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_precision_loss)]
         let doc_limit = (available as f32 * 0.5) as usize;
         let sources_limit = available.saturating_sub(doc_limit);
         let per_source_limit = sources_limit / sources_count;
 
         (doc_limit, per_source_limit)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_context_budgeter_handles_small_total_budget() {
-        let budgeter = ContextBudgeter::new(1000);
-        // prompt and outline tokens are minimal here
-        let (doc_limit, source_limit) = budgeter.allocate_limits("test", None, 1);
-        
-        // With total 1000, reservation should be capped at 250 (1/4 of 1000)
-        // available = 1000 - 250 = 750
-        // doc_limit = 750 * 0.5 = 375
-        // source_limit = 750 - 375 = 375
-        assert_eq!(doc_limit, 375);
-        assert_eq!(source_limit, 375);
     }
 }
 
@@ -162,4 +144,23 @@ fn render_source_sections(sources: &[FetchedSource], max_source_tokens: usize) -
         })
         .collect::<Vec<_>>()
         .join("\n\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_context_budgeter_handles_small_total_budget() {
+        let budgeter = ContextBudgeter::new(1000);
+        // prompt and outline tokens are minimal here
+        let (doc_limit, source_limit) = budgeter.allocate_limits("test", None, 1);
+        
+        // With total 1000, reservation should be capped at 250 (1/4 of 1000)
+        // available = 1000 - 250 = 750
+        // doc_limit = 750 * 0.5 = 375
+        // source_limit = 750 - 375 = 375
+        assert_eq!(doc_limit, 375);
+        assert_eq!(source_limit, 375);
+    }
 }

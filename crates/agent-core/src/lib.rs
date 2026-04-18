@@ -25,6 +25,8 @@ pub enum ExpansionError {
     Timeout(String),
     #[error("Internal error: {0}")]
     Internal(String),
+    #[error("Evaluation error: {0}")]
+    Evaluation(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -87,6 +89,19 @@ pub struct FetchedSource {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvaluationResult {
+    pub score: u8,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvaluationRequest {
+    pub prompt: String,
+    pub content: String,
+    pub sources: Vec<FetchedSource>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExpansionRequest {
     pub prompt: String,
     pub document: ParsedDocument,
@@ -96,6 +111,15 @@ pub struct ExpansionRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExpansionResult {
     pub content: String,
+    pub search_queries: Vec<String>,
+    pub sources: Vec<FetchedSource>,
+    pub score: u8,
+    pub is_qualified: bool,
+    pub evaluation_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResearchResult {
     pub search_queries: Vec<String>,
     pub sources: Vec<FetchedSource>,
 }
@@ -120,6 +144,14 @@ pub trait UrlFetcher: Send + Sync {
     fn fetch(&self, url: &str) -> BoxFuture<'_, Result<FetchedSource, ExpansionError>>;
 }
 
+pub trait EvaluatorRuntime: Send + Sync {
+    fn evaluate(&self, request: EvaluationRequest) -> BoxFuture<'_, Result<EvaluationResult, ExpansionError>>;
+}
+
+pub trait ResearchRuntime: Send + Sync {
+    fn research(&self, request: ExpansionRequest) -> BoxFuture<'_, Result<ResearchResult, ExpansionError>>;
+}
+
 #[must_use]
 pub fn truncate_chars(value: &str, limit: usize) -> String {
     value.chars().take(limit).collect()
@@ -132,4 +164,10 @@ pub fn normalize_whitespace(value: &str) -> String {
 
 pub trait ExpansionRuntime: Send + Sync {
     fn expand(&self, request: ExpansionRequest) -> BoxFuture<'_, Result<ExpansionResult, ExpansionError>>;
+    
+    fn generate(
+        &self,
+        request: ExpansionRequest,
+        research: ResearchResult,
+    ) -> BoxFuture<'_, Result<ExpansionResult, ExpansionError>>;
 }

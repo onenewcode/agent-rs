@@ -3,7 +3,7 @@ use std::time::Duration;
 use rig::{client::CompletionClient, completion::Prompt, providers::openrouter};
 use tracing::{info, warn};
 
-use crate::{config::DocxAgentConfig, error::DocxAgentError};
+use crate::{config::LlmConfig, error::DocxAgentError};
 
 const RETRYABLE_ERROR_PATTERNS: &[&str] = &[
     "429",
@@ -22,7 +22,8 @@ const RETRYABLE_ERROR_PATTERNS: &[&str] = &[
 
 pub(crate) struct RigLlmBackend<P: Prompt> {
     agent: P,
-    config: DocxAgentConfig,
+    config: LlmConfig,
+    max_attempts: usize,
 }
 
 impl<P: Prompt> agent_core::LlmBackend for RigLlmBackend<P> {
@@ -36,7 +37,7 @@ impl<P: Prompt> agent_core::LlmBackend for RigLlmBackend<P> {
                 &self.agent,
                 &prompt,
                 &self.config,
-                self.config.max_generation_attempts(),
+                self.max_attempts,
             )
             .await
             .map_err(|e| match e {
@@ -47,12 +48,15 @@ impl<P: Prompt> agent_core::LlmBackend for RigLlmBackend<P> {
     }
 }
 
+#[allow(clippy::needless_pass_by_value)]
 pub(crate) fn build_agent(
     http: reqwest::Client,
-    config: DocxAgentConfig,
+    config: LlmConfig,
+    system_prompt: String,
+    max_attempts: usize,
 ) -> Result<RigLlmBackend<impl Prompt>, DocxAgentError> {
     let client = openrouter::Client::builder()
-        .api_key(config.llm.api_key.as_str())
+        .api_key(config.api_key.as_str())
         .http_client(http)
         .build()
         .map_err(|error| {
@@ -64,26 +68,27 @@ pub(crate) fn build_agent(
         })?;
 
     let agent = client
-        .agent(&config.llm.model)
-        .preamble(config.system_prompt())
+        .agent(&config.model)
+        .preamble(&system_prompt)
         .build();
 
     Ok(RigLlmBackend {
         agent,
         config,
+        max_attempts,
     })
 }
 
 pub(crate) async fn generate_with_retry(
     agent: &impl Prompt,
     prompt: &str,
-    config: &DocxAgentConfig,
+    config: &LlmConfig,
     max_attempts: usize,
 ) -> Result<String, DocxAgentError> {
     for attempt in 1..=max_attempts {
         match agent.prompt(prompt).await {
             Ok(content) => {
-                log_telemetry(&config.llm, prompt, &content);
+                log_telemetry(config, prompt, &content);
                 return Ok(content);
             }
             Err(error) => {
@@ -91,7 +96,7 @@ pub(crate) async fn generate_with_retry(
                 if is_retryable_error(&message) && attempt < max_attempts {
                     let delay = Duration::from_secs(attempt as u64 * 2);
                     warn!(
-                        model = %config.llm.model,
+                        model = %config.model,
                         attempt,
                         delay_secs = delay.as_secs(),
                         error = %message,
@@ -111,15 +116,16 @@ pub(crate) async fn generate_with_retry(
     ))
 }
 
-fn log_telemetry(config: &crate::config::LlmConfig, input: &str, output: &str) {
+fn log_telemetry(config: &LlmConfig, input: &str, output: &str) {
     let input_tokens = crate::domain::count_tokens(input);
     let output_tokens = crate::domain::count_tokens(output);
 
     let input_cost_per_token = config.input_cost_per_1m / 1_000_000.0;
     let output_cost_per_token = config.output_cost_per_1m / 1_000_000.0;
 
-    let total_cost =
-        (input_tokens as f64 * input_cost_per_token) + (output_tokens as f64 * output_cost_per_token);
+    #[allow(clippy::cast_precision_loss)]
+    let total_cost = (input_tokens as f64 * input_cost_per_token)
+        + (output_tokens as f64 * output_cost_per_token);
 
     info!(
         model = %config.model,
@@ -134,14 +140,14 @@ pub(crate) async fn generate_optimized_search_query(
     agent: &(impl agent_core::LlmBackend + ?Sized),
     title: Option<&str>,
     prompt: &str,
-    config: &DocxAgentConfig,
+    model_name: &str,
 ) -> Result<String, DocxAgentError> {
-    let title_context = title.map_or("".to_owned(), |t| format!("Document title: {t}\n"));
+    let title_context = title.map_or(String::new(), |t| format!("Document title: {t}\n"));
     let generation_prompt = format!(
         "{title_context}User intent: {prompt}\n\nBased on the document title and user intent, generate ONE concise, effective search query to find supporting materials. Output ONLY the query text without quotes or explanations.",
     );
 
-    info!(model = %config.llm.model, "generating optimized search query via LLM");
+    info!(model = %model_name, "generating optimized search query via LLM");
 
     let query = agent.prompt(&generation_prompt).await.map_err(DocxAgentError::Agent)?;
     let trimmed = query.trim().trim_matches('"').to_owned();

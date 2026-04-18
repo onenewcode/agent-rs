@@ -3,6 +3,8 @@ members = [
     "apps/docx-cli",
     "crates/agent-core",
     "crates/docx-agent",
+    "crates/evaluator-agent",
+    "crates/orchestrator",
 ]
 resolver = "2"
 
