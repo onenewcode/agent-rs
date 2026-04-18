@@ -84,7 +84,20 @@ fn init_tracing() -> anyhow::Result<()> {
 }
 
 fn default_config_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .join("agent.toml")
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let primary = root.join("agent.toml");
+    if primary.exists() {
+        return primary;
+    }
+
+    let fallback = root.join("agent.example.toml");
+    if fallback.exists() {
+        info!(
+            fallback = %fallback.display(),
+            "agent.toml not found, falling back to example configuration"
+        );
+        return fallback;
+    }
+
+    primary
 }

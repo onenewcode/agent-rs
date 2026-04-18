@@ -59,7 +59,7 @@ impl TavilySearchClient {
                 "Tavily failure response preview"
             );
             return Err(DocxAgentError::Agent(
-                format!("tavily search failed with status {status}").into(),
+                agent_core::ExpansionError::Provider(format!("tavily search failed with status {status}")),
             ));
         }
 
@@ -67,10 +67,11 @@ impl TavilySearchClient {
             warn!(query_chars, "failed to parse Tavily response");
             debug!(
                 query_chars,
+                status = %status,
                 response_preview = %truncate_for_log(&body),
                 "Tavily parse failure response preview"
             );
-            DocxAgentError::Agent(format!("failed to parse Tavily response: {error}").into())
+            DocxAgentError::Agent(agent_core::ExpansionError::Provider(format!("failed to parse Tavily response: {error}")))
         })?;
 
         let results: Vec<FetchedSource> = payload
@@ -93,9 +94,13 @@ impl SearchBackend for TavilySearchClient {
         &self,
         query: &str,
         max_results: usize,
-    ) -> BoxFuture<'_, Result<Vec<FetchedSource>, agent_core::BoxError>> {
+    ) -> BoxFuture<'_, Result<Vec<FetchedSource>, agent_core::ExpansionError>> {
         let query = query.to_owned();
-        Box::pin(async move { self.search(&query, max_results).await.map_err(Into::into) })
+        Box::pin(async move {
+            self.search(&query, max_results)
+                .await
+                .map_err(|e| agent_core::ExpansionError::Provider(e.to_string()))
+        })
     }
 }
 

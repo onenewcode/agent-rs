@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use agent_core::{BoxError, BoxFuture, FetchedSource, UrlFetcher};
+use agent_core::{BoxError, BoxFuture, ExpansionError, FetchedSource, UrlFetcher};
 use sha2::{Digest, Sha256};
 use tokio::fs;
 use tracing::{info, warn};
@@ -10,6 +10,7 @@ use tracing::{info, warn};
 pub struct DiskCacheFetcher<F: UrlFetcher> {
     inner: F,
     cache_dir: PathBuf,
+    max_age_days: u64,
 }
 
 impl<F: UrlFetcher> DiskCacheFetcher<F> {
@@ -18,6 +19,7 @@ impl<F: UrlFetcher> DiskCacheFetcher<F> {
         let fetcher = Self {
             inner,
             cache_dir: cache_dir.clone(),
+            max_age_days,
         };
 
         // Run pruning in the background or just spawn a task
@@ -39,18 +41,37 @@ impl<F: UrlFetcher> DiskCacheFetcher<F> {
 }
 
 impl<F: UrlFetcher> UrlFetcher for DiskCacheFetcher<F> {
-    fn fetch(&self, url: &str) -> BoxFuture<'_, Result<FetchedSource, BoxError>> {
+    fn fetch(&self, url: &str) -> BoxFuture<'_, Result<FetchedSource, ExpansionError>> {
         let url = url.to_owned();
         let path = self.cache_path(&url);
         let cache_dir = self.cache_dir.clone();
+        let max_age = Duration::from_secs(self.max_age_days * 24 * 3600);
 
         Box::pin(async move {
             if path.exists() {
-                if let Ok(content) = fs::read_to_string(&path).await {
-                    if let Ok(source) = serde_json::from_str::<FetchedSource>(&content) {
-                        info!(url, path = %path.display(), "cache hit for disk fetcher");
-                        return Ok(source);
+                let is_valid = if let Ok(metadata) = fs::metadata(&path).await {
+                    if let Ok(modified) = metadata.modified() {
+                        if let Ok(age) = SystemTime::now().duration_since(modified) {
+                            age < max_age
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
                     }
+                } else {
+                    false
+                };
+
+                if is_valid {
+                    if let Ok(content) = fs::read_to_string(&path).await {
+                        if let Ok(source) = serde_json::from_str::<FetchedSource>(&content) {
+                            info!(url, path = %path.display(), "cache hit for disk fetcher");
+                            return Ok(source);
+                        }
+                    }
+                } else {
+                    info!(url, path = %path.display(), "cache expired or invalid, refetching");
                 }
             }
 
@@ -96,4 +117,62 @@ async fn prune_stale_cache(cache_dir: &Path, max_age_days: u64) -> Result<(), Bo
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use agent_core::SourceKind;
+
+    struct MockFetcher(Arc<AtomicUsize>);
+    impl UrlFetcher for MockFetcher {
+        fn fetch(&self, url: &str) -> BoxFuture<'_, Result<FetchedSource, ExpansionError>> {
+            let url = url.to_owned();
+            let count = self.0.clone();
+            Box::pin(async move {
+                count.fetch_add(1, Ordering::SeqCst);
+                Ok(FetchedSource {
+                    kind: SourceKind::UserUrl,
+                    title: Some("Mock".to_owned()),
+                    url,
+                    summary: None,
+                    content: "Fresh Content".to_owned(),
+                })
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn test_disk_cache_enforces_expiration() -> Result<(), BoxError> {
+        let temp_dir = std::env::temp_dir().join(format!("agent-cache-test-{}", SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?.as_millis()));
+        let url = "https://example.com/stale";
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let fetcher = DiskCacheFetcher::new(MockFetcher(call_count.clone()), &temp_dir, 1);
+
+        // 1. Initial fetch (cache miss)
+        let res1 = fetcher.fetch(url).await?;
+        assert_eq!(res1.content, "Fresh Content");
+        assert_eq!(call_count.load(Ordering::SeqCst), 1);
+
+        // 2. Immediate fetch (cache hit)
+        let res2 = fetcher.fetch(url).await?;
+        assert_eq!(res2.content, "Fresh Content");
+        assert_eq!(call_count.load(Ordering::SeqCst), 1);
+
+        // 3. Manually backdate the cache file to make it stale (2 days old)
+        let cache_path = fetcher.cache_path(url);
+        let stale_time = SystemTime::now() - Duration::from_secs(2 * 24 * 3600);
+        filetime::set_file_mtime(&cache_path, filetime::FileTime::from_system_time(stale_time))?;
+
+        // 4. Fetch again (cache expired, should refetch)
+        let res3 = fetcher.fetch(url).await?;
+        assert_eq!(res3.content, "Fresh Content");
+        assert_eq!(call_count.load(Ordering::SeqCst), 2);
+
+        // Cleanup
+        fs::remove_dir_all(temp_dir).await?;
+        Ok(())
+    }
 }

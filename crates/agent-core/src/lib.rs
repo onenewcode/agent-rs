@@ -4,9 +4,28 @@ use std::future::Future;
 use std::pin::Pin;
 
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+#[derive(Debug, Error, Serialize, Deserialize)]
+pub enum ExpansionError {
+    #[error("Research error ({kind}): {message}")]
+    Research { kind: String, message: String },
+    #[error("Parse error: {0}")]
+    Parse(String),
+    #[error("Network error: {0}")]
+    Network(String),
+    #[error("Rate limited: {0}")]
+    RateLimited(String),
+    #[error("Provider error: {0}")]
+    Provider(String),
+    #[error("Timeout error: {0}")]
+    Timeout(String),
+    #[error("Internal error: {0}")]
+    Internal(String),
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BlockKind {
@@ -41,11 +60,7 @@ impl ParsedDocument {
                     out.push_str(&block.text);
                     out.push_str("\n\n");
                 }
-                BlockKind::Paragraph => {
-                    out.push_str(&block.text);
-                    out.push_str("\n\n");
-                }
-                BlockKind::Table => {
+                BlockKind::Paragraph | BlockKind::Table => {
                     out.push_str(&block.text);
                     out.push_str("\n\n");
                 }
@@ -85,9 +100,12 @@ pub struct ExpansionResult {
     pub sources: Vec<FetchedSource>,
 }
 
+pub trait LlmBackend: Send + Sync {
+    fn prompt(&self, prompt: &str) -> BoxFuture<'_, Result<String, ExpansionError>>;
+}
 
 pub trait DocumentParser: Send + Sync {
-    fn parse_path(&self, path: &std::path::Path) -> Result<ParsedDocument, BoxError>;
+    fn parse_path(&self, path: &std::path::Path) -> Result<ParsedDocument, ExpansionError>;
 }
 
 pub trait SearchBackend: Send + Sync {
@@ -95,11 +113,11 @@ pub trait SearchBackend: Send + Sync {
         &self,
         query: &str,
         max_results: usize,
-    ) -> BoxFuture<'_, Result<Vec<FetchedSource>, BoxError>>;
+    ) -> BoxFuture<'_, Result<Vec<FetchedSource>, ExpansionError>>;
 }
 
 pub trait UrlFetcher: Send + Sync {
-    fn fetch(&self, url: &str) -> BoxFuture<'_, Result<FetchedSource, BoxError>>;
+    fn fetch(&self, url: &str) -> BoxFuture<'_, Result<FetchedSource, ExpansionError>>;
 }
 
 #[must_use]
@@ -113,5 +131,5 @@ pub fn normalize_whitespace(value: &str) -> String {
 }
 
 pub trait ExpansionRuntime: Send + Sync {
-    fn expand(&self, request: ExpansionRequest) -> BoxFuture<'_, Result<ExpansionResult, BoxError>>;
+    fn expand(&self, request: ExpansionRequest) -> BoxFuture<'_, Result<ExpansionResult, ExpansionError>>;
 }

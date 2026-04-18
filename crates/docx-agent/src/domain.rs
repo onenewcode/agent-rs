@@ -1,11 +1,19 @@
+use std::sync::OnceLock;
+
 use agent_core::{ExpansionRequest, FetchedSource};
-use tiktoken_rs::cl100k_base;
+use tiktoken_rs::{cl100k_base, CoreBPE};
+
+static TOKENIZER: OnceLock<CoreBPE> = OnceLock::new();
+
+fn get_tokenizer() -> &'static CoreBPE {
+    TOKENIZER.get_or_init(|| cl100k_base().expect("failed to load tiktoken bpe"))
+}
 
 pub(crate) fn truncate_tokens(text: &str, max_tokens: usize) -> String {
     if max_tokens == 0 {
         return "".to_owned();
     }
-    let bpe = cl100k_base().expect("failed to load tiktoken bpe");
+    let bpe = get_tokenizer();
     let tokens = bpe.encode_with_special_tokens(text);
     if tokens.len() <= max_tokens {
         return text.to_owned();
@@ -15,8 +23,7 @@ pub(crate) fn truncate_tokens(text: &str, max_tokens: usize) -> String {
 }
 
 pub(crate) fn count_tokens(text: &str) -> usize {
-    let bpe = cl100k_base().expect("failed to load tiktoken bpe");
-    bpe.encode_with_special_tokens(text).len()
+    get_tokenizer().encode_with_special_tokens(text).len()
 }
 
 pub struct ContextBudgeter {
@@ -37,8 +44,10 @@ impl ContextBudgeter {
         let prompt_tokens = count_tokens(prompt);
         let outline_tokens = outline.map_or(0, count_tokens);
 
-        // Reserve tokens for output, templates, and fixed fields (approx 2000 tokens)
-        let reserved = prompt_tokens + outline_tokens + 2000;
+        // Dynamically reserve space for output and templates, but cap at 1/4 of budget if total is small
+        let needed_reservation = prompt_tokens + outline_tokens + 2000;
+        let reserved = std::cmp::min(needed_reservation, self.total_budget / 4);
+
         let available = self.total_budget.saturating_sub(reserved);
 
         if sources_count == 0 {
@@ -51,6 +60,25 @@ impl ContextBudgeter {
         let per_source_limit = sources_limit / sources_count;
 
         (doc_limit, per_source_limit)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_context_budgeter_handles_small_total_budget() {
+        let budgeter = ContextBudgeter::new(1000);
+        // prompt and outline tokens are minimal here
+        let (doc_limit, source_limit) = budgeter.allocate_limits("test", None, 1);
+        
+        // With total 1000, reservation should be capped at 250 (1/4 of 1000)
+        // available = 1000 - 250 = 750
+        // doc_limit = 750 * 0.5 = 375
+        // source_limit = 750 - 375 = 375
+        assert_eq!(doc_limit, 375);
+        assert_eq!(source_limit, 375);
     }
 }
 

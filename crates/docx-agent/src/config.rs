@@ -55,6 +55,20 @@ pub struct LlmConfig {
     pub provider: String,
     pub model: String,
     pub api_key: String,
+    #[serde(default = "LlmConfig::default_input_cost")]
+    pub input_cost_per_1m: f64,
+    #[serde(default = "LlmConfig::default_output_cost")]
+    pub output_cost_per_1m: f64,
+}
+
+impl LlmConfig {
+    fn default_input_cost() -> f64 {
+        0.15
+    }
+
+    fn default_output_cost() -> f64 {
+        0.60
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

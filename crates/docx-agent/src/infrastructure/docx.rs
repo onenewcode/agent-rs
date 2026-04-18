@@ -80,8 +80,8 @@ impl DocxDocumentParser {
 }
 
 impl DocumentParser for DocxDocumentParser {
-    fn parse_path(&self, path: &Path) -> Result<ParsedDocument, agent_core::BoxError> {
-        Self::parse(path).map_err(Into::into)
+    fn parse_path(&self, path: &Path) -> Result<ParsedDocument, agent_core::ExpansionError> {
+        Self::parse(path).map_err(|e| agent_core::ExpansionError::Parse(e.to_string()))
     }
 }
 

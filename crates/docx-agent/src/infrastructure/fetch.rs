@@ -62,9 +62,13 @@ impl WebPageFetcher {
 }
 
 impl UrlFetcher for WebPageFetcher {
-    fn fetch(&self, url: &str) -> BoxFuture<'_, Result<FetchedSource, agent_core::BoxError>> {
+    fn fetch(&self, url: &str) -> BoxFuture<'_, Result<FetchedSource, agent_core::ExpansionError>> {
         let url = url.to_owned();
-        Box::pin(async move { self.fetch_url(&url).await.map_err(Into::into) })
+        Box::pin(async move {
+            self.fetch_url(&url)
+                .await
+                .map_err(|e| agent_core::ExpansionError::Network(e.to_string()))
+        })
     }
 }
 
@@ -130,6 +134,13 @@ fn find_content_blocks(element: ElementRef<'_>, out: &mut Vec<TextBlock>) {
                 link_text_len: link_len,
             });
         }
+        
+        // Even if this is a block, continue searching children for more specific blocks
+        for child in element.children() {
+            if let Some(child_element) = ElementRef::wrap(child) {
+                find_content_blocks(child_element, out);
+            }
+        }
     } else {
         for child in element.children() {
             if let Some(child_element) = ElementRef::wrap(child) {
@@ -140,7 +151,13 @@ fn find_content_blocks(element: ElementRef<'_>, out: &mut Vec<TextBlock>) {
 }
 
 fn collect_block_stats(element: ElementRef<'_>, text_out: &mut String, link_len_out: &mut usize) {
-    let is_link = element.value().name() == "a";
+    let tag_name = element.value().name();
+    let is_link = tag_name == "a";
+    let is_block = is_block_element(tag_name);
+
+    if is_block && !text_out.is_empty() && !text_out.ends_with(char::is_whitespace) {
+        text_out.push(' ');
+    }
 
     for child in element.children() {
         if let Some(text) = child.value().as_text() {
@@ -153,6 +170,10 @@ fn collect_block_stats(element: ElementRef<'_>, text_out: &mut String, link_len_
         if let Some(child_element) = ElementRef::wrap(child) {
             collect_block_stats(child_element, text_out, link_len_out);
         }
+    }
+    
+    if is_block && !text_out.ends_with(char::is_whitespace) {
+        text_out.push(' ');
     }
 }
 
@@ -251,7 +272,7 @@ mod tests {
     #[test]
     fn body_extraction_preserves_word_boundaries_between_blocks() {
         let document = Html::parse_document("<html><body><p>Hello</p><p>World</p></body></html>");
-        let body = extract_body_text(&document).expect("body text should exist");
+        let body = extract_body_text(&document).unwrap_or_default();
         assert_eq!(body, "Hello World");
     }
 
@@ -259,7 +280,7 @@ mod tests {
     fn body_extraction_keeps_inline_word_contiguous() {
         let document =
             Html::parse_document("<html><body><p>exa<strong>mple</strong></p></body></html>");
-        let body = extract_body_text(&document).expect("body text should exist");
+        let body = extract_body_text(&document).unwrap_or_default();
         assert_eq!(body, "example");
     }
 
@@ -268,7 +289,7 @@ mod tests {
         let document = Html::parse_document(
             "<html><body><script>var ignored = true;</script><style>.ignored { color: red; }</style><noscript>ignored fallback</noscript><p>Main text</p></body></html>",
         );
-        let body = extract_body_text(&document).expect("body text should exist");
+        let body = extract_body_text(&document).unwrap_or_default();
         assert_eq!(body, "Main text");
     }
 

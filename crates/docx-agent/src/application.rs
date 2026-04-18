@@ -20,9 +20,9 @@ use crate::{
 
 pub struct DocxExpansionService {
     config: DocxAgentConfig,
-    http: reqwest::Client,
     search_client: Option<Arc<dyn SearchBackend>>,
     fetcher: Arc<dyn UrlFetcher>,
+    llm_client: Option<Arc<dyn agent_core::LlmBackend>>,
 }
 
 impl DocxExpansionService {
@@ -52,6 +52,9 @@ impl DocxExpansionService {
             config.fetch.max_cache_age_days,
         ));
 
+        let llm_client: Arc<dyn agent_core::LlmBackend> =
+            Arc::new(llm::build_agent(http, config.clone())?);
+
         info!(
             search_enabled = search_client.is_some(),
             source_token_limit = config.limits.source_tokens,
@@ -62,24 +65,24 @@ impl DocxExpansionService {
 
         Ok(Self {
             config,
-            http,
             search_client,
             fetcher,
+            llm_client: Some(llm_client),
         })
     }
 
     #[must_use]
     pub fn new_with_infra(
         config: DocxAgentConfig,
-        http: reqwest::Client,
         search_client: Option<Arc<dyn SearchBackend>>,
         fetcher: Arc<dyn UrlFetcher>,
+        llm_client: Option<Arc<dyn agent_core::LlmBackend>>,
     ) -> Self {
         Self {
             config,
-            http,
             search_client,
             fetcher,
+            llm_client,
         }
     }
 
@@ -132,13 +135,13 @@ impl DocxExpansionService {
                 let _permit = sem
                     .acquire()
                     .await
-                    .map_err(|e| DocxAgentError::Agent(Box::new(e)))?;
+                    .map_err(|e| agent_core::ExpansionError::Internal(e.to_string()))?;
                 match timeout(timeout_dur, f.fetch(&u)).await {
-                    Ok(res) => res.map_err(DocxAgentError::Agent),
-                    Err(_) => Err(DocxAgentError::ResearchError {
-                        kind: "fetch_timeout",
-                        message: format!("fetching {u} timed out after {}s", timeout_dur.as_secs()),
-                    }),
+                    Ok(res) => res,
+                    Err(_) => Err(agent_core::ExpansionError::Timeout(format!(
+                        "fetching {u} timed out after {}s",
+                        timeout_dur.as_secs()
+                    ))),
                 }
             });
         }
@@ -174,12 +177,22 @@ impl DocxExpansionService {
             return Ok(None);
         }
 
-        let agent = llm::build_agent(&self.http, &self.config)?;
+        let Some(backend) = self.search_client.as_ref() else {
+            tracing::warn!("prompt requested search but no search API key is configured");
+            return Ok(None);
+        };
+
+        let llm = self.llm_client.as_ref().ok_or_else(|| {
+            DocxAgentError::Agent(agent_core::ExpansionError::Internal(
+                "LLM client not initialized".to_owned(),
+            ))
+        })?;
+
         let query = match llm::generate_optimized_search_query(
-            &agent,
+            &**llm,
             request.document.title.as_deref(),
             &request.prompt,
-            &self.config.llm.model,
+            &self.config,
         )
         .await
         {
@@ -188,11 +201,6 @@ impl DocxExpansionService {
                 warn!(error = %e, "LLM search query generation failed, using fallback");
                 domain::build_fallback_search_query(request)
             }
-        };
-
-        let Some(backend) = self.search_client.as_ref() else {
-            tracing::warn!("prompt requested search but no search API key is configured");
-            return Ok(None);
         };
 
         let timeout_dur = Duration::from_secs(self.config.search.timeout_secs);
@@ -215,8 +223,13 @@ impl DocxExpansionService {
         request: &ExpansionRequest,
         sources: &[FetchedSource],
     ) -> Result<String, DocxAgentError> {
-        let agent = llm::build_agent(&self.http, &self.config)?;
         let budgeter = domain::ContextBudgeter::new(self.config.limits.max_total_tokens());
+
+        let agent = self.llm_client.as_ref().ok_or_else(|| {
+            DocxAgentError::Agent(agent_core::ExpansionError::Internal(
+                "LLM client not initialized".to_owned(),
+            ))
+        })?;
 
         // Phase 1: Generate Outline
         let outline_prompt = domain::render_outline_prompt(
@@ -227,13 +240,7 @@ impl DocxExpansionService {
         );
 
         info!(model = %self.config.llm.model, "generating expansion outline");
-        let outline = llm::generate_with_retry(
-            &agent,
-            &outline_prompt,
-            &self.config.llm.model,
-            self.config.max_generation_attempts(),
-        )
-        .await?;
+        let outline = agent.prompt(&outline_prompt).await.map_err(DocxAgentError::Agent)?;
 
         // Phase 2: Generate Final Content
         let prompt_text = domain::render_generation_prompt(
@@ -248,16 +255,10 @@ impl DocxExpansionService {
             model = %self.config.llm.model,
             prompt_tokens = domain::count_tokens(&prompt_text),
             sources = sources.len(),
-            "sending final generation request to OpenRouter"
+            "sending final generation request"
         );
 
-        llm::generate_with_retry(
-            &agent,
-            &prompt_text,
-            &self.config.llm.model,
-            self.config.max_generation_attempts(),
-        )
-        .await
+        agent.prompt(&prompt_text).await.map_err(DocxAgentError::Agent)
     }
 }
 
@@ -265,7 +266,7 @@ impl ExpansionRuntime for DocxExpansionService {
     fn expand(
         &self,
         request: ExpansionRequest,
-    ) -> BoxFuture<'_, Result<ExpansionResult, agent_core::BoxError>> {
+    ) -> BoxFuture<'_, Result<ExpansionResult, agent_core::ExpansionError>> {
         let global_timeout = Duration::from_secs(self.config.limits.global_timeout_secs);
 
         Box::pin(async move {
@@ -275,10 +276,14 @@ impl ExpansionRuntime for DocxExpansionService {
                     self.collect_search_sources(&request)
                 );
 
-                let mut sources = user_sources_res?;
+                let mut sources = user_sources_res.map_err(|e| {
+                    agent_core::ExpansionError::Internal(format!("User sources collection failed: {e}"))
+                })?;
                 let mut search_queries = Vec::new();
 
-                if let Some((query, results)) = search_sources_res? {
+                if let Some((query, results)) = search_sources_res.map_err(|e| {
+                    agent_core::ExpansionError::Internal(format!("Search sources collection failed: {e}"))
+                })? {
                     search_queries.push(query);
                     sources.extend(results);
                 }
@@ -289,23 +294,26 @@ impl ExpansionRuntime for DocxExpansionService {
                     "collected supporting sources"
                 );
 
-                let content = self.generate_content(&request, &sources).await?;
+                let content = self.generate_content(&request, &sources).await.map_err(|e| {
+                    match e {
+                        DocxAgentError::Agent(inner) => inner,
+                        _ => agent_core::ExpansionError::Internal(e.to_string()),
+                    }
+                })?;
 
-                Ok::<_, DocxAgentError>(ExpansionResult {
+                Ok::<_, agent_core::ExpansionError>(ExpansionResult {
                     content,
                     search_queries,
                     sources,
                 })
             })
             .await
-            .map_err(|_| DocxAgentError::ResearchError {
-                kind: "global_timeout",
-                message: format!(
+            .map_err(|_| {
+                agent_core::ExpansionError::Timeout(format!(
                     "total expansion process timed out after {}s",
                     global_timeout.as_secs()
-                ),
+                ))
             })?
-            .map_err(Into::into)
         })
     }
 }
@@ -317,7 +325,7 @@ mod tests {
 
     struct MockUrlFetcher;
     impl UrlFetcher for MockUrlFetcher {
-        fn fetch(&self, url: &str) -> BoxFuture<'_, Result<FetchedSource, agent_core::BoxError>> {
+        fn fetch(&self, url: &str) -> BoxFuture<'_, Result<FetchedSource, agent_core::ExpansionError>> {
             let url = url.to_owned();
             Box::pin(async move {
                 Ok(FetchedSource {
@@ -337,7 +345,7 @@ mod tests {
             &self,
             _query: &str,
             _max_results: usize,
-        ) -> BoxFuture<'_, Result<Vec<FetchedSource>, agent_core::BoxError>> {
+        ) -> BoxFuture<'_, Result<Vec<FetchedSource>, agent_core::ExpansionError>> {
             Box::pin(async move {
                 Ok(vec![FetchedSource {
                     kind: SourceKind::SearchResult,
@@ -350,8 +358,22 @@ mod tests {
         }
     }
 
+    struct MockLlm {
+        responses: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl agent_core::LlmBackend for MockLlm {
+        fn prompt(
+            &self,
+            _prompt: &str,
+        ) -> agent_core::BoxFuture<'_, Result<String, agent_core::ExpansionError>> {
+            let res = self.responses.lock().unwrap().remove(0);
+            Box::pin(async move { Ok(res) })
+        }
+    }
+
     #[tokio::test]
-    async fn test_expansion_pipeline_orchestration() -> Result<(), agent_core::BoxError> {
+    async fn test_expansion_pipeline_orchestration() -> Result<(), agent_core::ExpansionError> {
         let config_toml = r#"
             [llm]
             provider = "openrouter"
@@ -371,12 +393,19 @@ mod tests {
             [fetch]
             user_agent = "test"
         "#;
-        let config: DocxAgentConfig = toml::from_str(config_toml)?;
+        let config: DocxAgentConfig = toml::from_str(config_toml).unwrap();
+        let mock_llm = Arc::new(MockLlm {
+            responses: Arc::new(std::sync::Mutex::new(vec![
+                "Mock Outline".to_owned(),
+                "Mock Final Content".to_owned(),
+            ])),
+        });
+
         let service = DocxExpansionService::new_with_infra(
             config,
-            reqwest::Client::new(),
             Some(Arc::new(MockSearchBackend)),
             Arc::new(MockUrlFetcher),
+            Some(mock_llm),
         );
 
         let request = ExpansionRequest {
@@ -391,13 +420,17 @@ mod tests {
             user_urls: vec!["https://example.com".to_owned()],
         };
 
-        // Note: This test will attempt real LLM call unless we mock LLM too.
-        // For now, let's just verify research phases in isolation if LLM is hard to mock.
-        let user_sources = service.collect_user_sources(&request.user_urls).await?;
+        let result = service.expand(request.clone()).await?;
+        assert_eq!(result.content, "Mock Final Content");
+        assert_eq!(result.sources.len(), 1); // Only user URL, no search
+
+        let user_sources = service.collect_user_sources(&request.user_urls).await
+            .map_err(|e| agent_core::ExpansionError::Internal(e.to_string()))?;
         assert_eq!(user_sources.len(), 1);
         assert_eq!(user_sources[0].url, "https://example.com");
 
-        let search_sources = service.collect_search_sources(&request).await?;
+        let search_sources = service.collect_search_sources(&request).await
+            .map_err(|e| agent_core::ExpansionError::Internal(e.to_string()))?;
         // "不要联网" should trigger the negative policy
         assert!(search_sources.is_none());
 

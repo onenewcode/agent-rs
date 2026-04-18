@@ -34,5 +34,5 @@ pub enum DocxAgentError {
         message: String,
     },
     #[error("agent execution failed: {0}")]
-    Agent(#[from] agent_core::BoxError),
+    Agent(#[from] agent_core::ExpansionError),
 }
