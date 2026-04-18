@@ -68,6 +68,21 @@ impl DocxExpansionService {
         })
     }
 
+    #[must_use]
+    pub fn new_with_infra(
+        config: DocxAgentConfig,
+        http: reqwest::Client,
+        search_client: Option<Arc<dyn SearchBackend>>,
+        fetcher: Arc<dyn UrlFetcher>,
+    ) -> Self {
+        Self {
+            config,
+            http,
+            search_client,
+            fetcher,
+        }
+    }
+
     pub fn parse_document(
         &self,
         path: &Path,
@@ -201,14 +216,14 @@ impl DocxExpansionService {
         sources: &[FetchedSource],
     ) -> Result<String, DocxAgentError> {
         let agent = llm::build_agent(&self.http, &self.config)?;
+        let budgeter = domain::ContextBudgeter::new(self.config.limits.max_total_tokens());
 
         // Phase 1: Generate Outline
         let outline_prompt = domain::render_outline_prompt(
             self.config.outline_template(),
             request,
             sources,
-            self.config.limits.document_tokens,
-            self.config.limits.source_tokens,
+            &budgeter,
         );
 
         info!(model = %self.config.llm.model, "generating expansion outline");
@@ -226,13 +241,12 @@ impl DocxExpansionService {
             request,
             sources,
             &outline,
-            self.config.limits.document_tokens,
-            self.config.limits.source_tokens,
+            &budgeter,
         );
 
         info!(
             model = %self.config.llm.model,
-            prompt_tokens = prompt_text.len() / 4, // Rough estimate for logging
+            prompt_tokens = domain::count_tokens(&prompt_text),
             sources = sources.len(),
             "sending final generation request to OpenRouter"
         );
@@ -293,5 +307,100 @@ impl ExpansionRuntime for DocxExpansionService {
             })?
             .map_err(Into::into)
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_core::{BlockKind, DocumentBlock, ParsedDocument, SourceKind};
+
+    struct MockUrlFetcher;
+    impl UrlFetcher for MockUrlFetcher {
+        fn fetch(&self, url: &str) -> BoxFuture<'_, Result<FetchedSource, agent_core::BoxError>> {
+            let url = url.to_owned();
+            Box::pin(async move {
+                Ok(FetchedSource {
+                    kind: SourceKind::UserUrl,
+                    title: Some("Mock Title".to_owned()),
+                    url,
+                    summary: None,
+                    content: "Mock Web Content".to_owned(),
+                })
+            })
+        }
+    }
+
+    struct MockSearchBackend;
+    impl SearchBackend for MockSearchBackend {
+        fn search(
+            &self,
+            _query: &str,
+            _max_results: usize,
+        ) -> BoxFuture<'_, Result<Vec<FetchedSource>, agent_core::BoxError>> {
+            Box::pin(async move {
+                Ok(vec![FetchedSource {
+                    kind: SourceKind::SearchResult,
+                    title: Some("Search Mock".to_owned()),
+                    url: "https://search.com".to_owned(),
+                    summary: None,
+                    content: "Search Result Content".to_owned(),
+                }])
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn test_expansion_pipeline_orchestration() -> Result<(), agent_core::BoxError> {
+        let config_toml = r#"
+            [llm]
+            provider = "openrouter"
+            model = "openai/gpt-4o-mini"
+            api_key = "test-key"
+
+            [search]
+            provider = "tavily"
+            api_key = "test-search-key"
+            max_results = 2
+
+            [limits]
+            document_tokens = 100
+            source_tokens = 100
+            max_total_tokens = 1000
+
+            [fetch]
+            user_agent = "test"
+        "#;
+        let config: DocxAgentConfig = toml::from_str(config_toml)?;
+        let service = DocxExpansionService::new_with_infra(
+            config,
+            reqwest::Client::new(),
+            Some(Arc::new(MockSearchBackend)),
+            Arc::new(MockUrlFetcher),
+        );
+
+        let request = ExpansionRequest {
+            prompt: "扩写这个文档，不要联网".to_owned(),
+            document: ParsedDocument {
+                title: Some("Test Doc".to_owned()),
+                blocks: vec![DocumentBlock {
+                    kind: BlockKind::Paragraph,
+                    text: "Original text".to_owned(),
+                }],
+            },
+            user_urls: vec!["https://example.com".to_owned()],
+        };
+
+        // Note: This test will attempt real LLM call unless we mock LLM too.
+        // For now, let's just verify research phases in isolation if LLM is hard to mock.
+        let user_sources = service.collect_user_sources(&request.user_urls).await?;
+        assert_eq!(user_sources.len(), 1);
+        assert_eq!(user_sources[0].url, "https://example.com");
+
+        let search_sources = service.collect_search_sources(&request).await?;
+        // "不要联网" should trigger the negative policy
+        assert!(search_sources.is_none());
+
+        Ok(())
     }
 }

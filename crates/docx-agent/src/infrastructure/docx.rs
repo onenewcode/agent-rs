@@ -36,23 +36,34 @@ impl DocxDocumentParser {
         let document = roxmltree::Document::parse(xml)?;
         let mut blocks = Vec::new();
 
-        for node in document
+        let body = document
             .descendants()
-            .filter(|node| is_word_node(node, "p"))
-        {
-            let text = extract_paragraph_text(node);
-            if text.is_empty() {
-                continue;
+            .find(|node| is_word_node(node, "body"))
+            .ok_or(DocxAgentError::EmptyDocument)?;
+
+        for node in body.children().filter(|n| n.is_element()) {
+            if is_word_node(&node, "p") {
+                let text = extract_paragraph_text(node);
+                if text.is_empty() {
+                    continue;
+                }
+
+                let block_kind = paragraph_style(node)
+                    .and_then(|style| heading_level(&style))
+                    .map_or(BlockKind::Paragraph, |level| BlockKind::Heading { level });
+
+                blocks.push(DocumentBlock {
+                    kind: block_kind,
+                    text,
+                });
+            } else if is_word_node(&node, "tbl") {
+                if let Some(table_markdown) = extract_table_markdown(node) {
+                    blocks.push(DocumentBlock {
+                        kind: BlockKind::Table,
+                        text: table_markdown,
+                    });
+                }
             }
-
-            let block_kind = paragraph_style(node)
-                .and_then(|style| heading_level(&style))
-                .map_or(BlockKind::Paragraph, |level| BlockKind::Heading { level });
-
-            blocks.push(DocumentBlock {
-                kind: block_kind,
-                text,
-            });
         }
 
         if blocks.is_empty() {
@@ -61,7 +72,7 @@ impl DocxDocumentParser {
 
         let title = blocks.iter().find_map(|block| match block.kind {
             BlockKind::Heading { .. } => Some(block.text.clone()),
-            BlockKind::Paragraph => None,
+            _ => None,
         });
 
         Ok(ParsedDocument { title, blocks })
@@ -106,6 +117,56 @@ fn extract_paragraph_text(node: roxmltree::Node<'_, '_>) -> String {
     }
 
     normalize_whitespace(&merged)
+}
+
+fn extract_table_markdown(node: roxmltree::Node<'_, '_>) -> Option<String> {
+    let mut rows = Vec::new();
+    for tr in node.children().filter(|n| is_word_node(n, "tr")) {
+        let mut cells = Vec::new();
+        for tc in tr.children().filter(|n| is_word_node(n, "tc")) {
+            let mut cell_text = String::new();
+            for p in tc.children().filter(|n| is_word_node(n, "p")) {
+                let p_text = extract_paragraph_text(p);
+                if !cell_text.is_empty() && !p_text.is_empty() {
+                    cell_text.push(' ');
+                }
+                cell_text.push_str(&p_text);
+            }
+            cells.push(cell_text.replace('|', "\\|"));
+        }
+        if !cells.is_empty() {
+            rows.push(cells);
+        }
+    }
+
+    if rows.is_empty() {
+        return None;
+    }
+
+    let mut out = String::new();
+    let max_cols = rows.iter().map(Vec::len).max().unwrap_or(0);
+
+    for (i, row) in rows.iter().enumerate() {
+        out.push_str("| ");
+        out.push_str(&row.join(" | "));
+        // Pad row if it has fewer columns than max
+        if row.len() < max_cols {
+            for _ in 0..(max_cols - row.len()) {
+                out.push_str(" | ");
+            }
+        }
+        out.push_str(" |\n");
+
+        if i == 0 {
+            out.push_str("| ");
+            for _ in 0..max_cols {
+                out.push_str("--- | ");
+            }
+            out.push('\n');
+        }
+    }
+
+    Some(out.trim().to_owned())
 }
 
 fn heading_level(style: &str) -> Option<u8> {

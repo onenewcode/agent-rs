@@ -47,12 +47,7 @@ pub(crate) async fn generate_with_retry(
     for attempt in 1..=max_attempts {
         match agent.prompt(prompt).await {
             Ok(content) => {
-                info!(
-                    model,
-                    attempt,
-                    output_chars = content.chars().count(),
-                    "received generation response from OpenRouter"
-                );
+                log_telemetry(model, prompt, &content);
                 return Ok(content);
             }
             Err(error) => {
@@ -78,6 +73,26 @@ pub(crate) async fn generate_with_retry(
     Err(DocxAgentError::Agent(
         "OpenRouter generation exhausted retries".to_owned().into(),
     ))
+}
+
+fn log_telemetry(model: &str, input: &str, output: &str) {
+    let input_tokens = crate::domain::count_tokens(input);
+    let output_tokens = crate::domain::count_tokens(output);
+
+    // GPT-4o-mini pricing as baseline
+    let input_cost_per_token = 0.15 / 1_000_000.0;
+    let output_cost_per_token = 0.60 / 1_000_000.0;
+
+    let total_cost =
+        (input_tokens as f64 * input_cost_per_token) + (output_tokens as f64 * output_cost_per_token);
+
+    info!(
+        model,
+        input_tokens,
+        output_tokens,
+        cost_usd = %format!("{:.6}", total_cost),
+        "LLM request completed"
+    );
 }
 
 pub(crate) async fn generate_optimized_search_query(

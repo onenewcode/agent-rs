@@ -12,6 +12,7 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 pub enum BlockKind {
     Heading { level: u8 },
     Paragraph,
+    Table,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,6 +42,10 @@ impl ParsedDocument {
                     out.push_str("\n\n");
                 }
                 BlockKind::Paragraph => {
+                    out.push_str(&block.text);
+                    out.push_str("\n\n");
+                }
+                BlockKind::Table => {
                     out.push_str(&block.text);
                     out.push_str("\n\n");
                 }

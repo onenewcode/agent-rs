@@ -76,6 +76,7 @@ impl SearchConfig {
 pub struct LimitsConfig {
     pub document_tokens: usize,
     pub source_tokens: usize,
+    pub max_total_tokens: Option<usize>,
     #[serde(default = "LimitsConfig::default_global_timeout_secs")]
     pub global_timeout_secs: u64,
 }
@@ -83,6 +84,10 @@ pub struct LimitsConfig {
 impl LimitsConfig {
     fn default_global_timeout_secs() -> u64 {
         180
+    }
+
+    pub fn max_total_tokens(&self) -> usize {
+        self.max_total_tokens.unwrap_or(128_000)
     }
 }
 
