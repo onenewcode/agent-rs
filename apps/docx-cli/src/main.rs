@@ -1,13 +1,13 @@
 use std::{path::PathBuf, sync::Arc};
 
-use agent_core::{ExpansionRuntime, Pipeline};
+use agent_adapters::{
+    AppConfig, DiskCacheSourceFetcher, DocxEvaluator, DocxGenerator, DocxPlanner, DocxRefiner,
+    TavilySearchProvider, WebPageSourceFetcher, build_openrouter_model,
+};
+use agent_kernel::{DocumentParser, LanguageModel, RunConstraints, RunReport, Task};
+use agent_runtime::{AgentRuntime, DefaultResearcher, ResearchSettings, RuntimeSettings};
 use anyhow::Context;
 use clap::{Parser, Subcommand};
-use docx_agent::DocxExpansionService;
-use docx_agent::steps::{EvaluationStep, GenerationStep, RefinementStep, ResearchStep};
-use evaluator_agent::EvaluatorService;
-use orchestrator::AgentOrchestrator;
-use rig::client::CompletionClient;
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
@@ -52,6 +52,8 @@ async fn main() -> anyhow::Result<()> {
 
 async fn expand(args: ExpandArgs) -> anyhow::Result<()> {
     let config_path = args.config.unwrap_or_else(default_config_path);
+    let app_config = AppConfig::from_path(&config_path)
+        .with_context(|| format!("failed to load config {}", config_path.display()))?;
     info!(
         config = %config_path.display(),
         doc = %args.doc.display(),
@@ -60,104 +62,152 @@ async fn expand(args: ExpandArgs) -> anyhow::Result<()> {
         "starting document expansion"
     );
 
-    // 1. Initialize core services
-    let expansion_service = Arc::new(
-        DocxExpansionService::from_config_path(&config_path)
-            .with_context(|| format!("failed to load config {}", config_path.display()))?,
-    );
-
-    let config = expansion_service.config().clone();
-    let http = reqwest::Client::builder()
-        .user_agent(&config.fetch.user_agent)
-        .build()?;
-
-    // 2. Initialize the Evaluator
-    let eval_client = rig::providers::openrouter::Client::builder()
-        .api_key(config.evaluator.llm.api_key.as_str())
-        .http_client(http.clone())
-        .build()
-        .map_err(|e| anyhow::anyhow!("failed to build evaluator client: {e}"))?;
-
-    let eval_agent = eval_client
-        .agent(&config.evaluator.llm.model)
-        .preamble(config.evaluator.system_prompt())
-        .build();
-
-    let evaluator_service = Arc::new(EvaluatorService::new(
-        eval_agent,
-        config.evaluator.evaluation_template().to_owned(),
-        config.evaluator.max_attempts(),
-    ));
-
-    // 3. Construct the Pipeline
-    let mut pipeline = Pipeline::new();
-    pipeline.add_step(Box::new(ResearchStep::new(
-        expansion_service.clone(),
-        config.limits.global_timeout_secs,
-    )));
-    pipeline.add_step(Box::new(GenerationStep::new(expansion_service.clone())));
-    pipeline.add_step(Box::new(EvaluationStep::new(
-        evaluator_service.clone(),
-        config.limits.min_score,
-    )));
-
-    // 4. Initialize the Orchestrator
-    let refiner = Arc::new(RefinementStep::new(
-        config.evaluator.refinement_template().to_owned(),
-    ));
-    let orchestrator =
-        AgentOrchestrator::new(pipeline, Some(refiner), config.evaluator.max_attempts());
-
-    // 5. Run the Pipeline
-    let document = expansion_service
-        .parse_document(&args.doc)
-        .map_err(|e| anyhow::anyhow!("failed to parse document: {e}"))?;
-
-    let request = agent_core::ExpansionRequest {
-        prompt: args.prompt.clone(),
-        document,
-        user_urls: args.urls.clone(),
-    };
-
-    let result = orchestrator
-        .expand(request)
+    let runtime = build_runtime(&app_config)?;
+    let report = run_task(&runtime, &args)
         .await
         .with_context(|| format!("failed to expand document {}", args.doc.display()))?;
-
-    // 6. Handle Results
-    if result.is_qualified {
-        info!(
-            score = result.score,
-            reason = result.evaluation_reason.as_deref().unwrap_or(""),
-            "Document expansion qualified"
-        );
-        if let Some(output) = args.output {
-            tokio::fs::write(&output, result.content)
-                .await
-                .with_context(|| format!("failed to write output file {}", output.display()))?;
-            info!(output = %output.display(), "wrote expansion output");
-        } else {
-            println!("{}", result.content);
-        }
-    } else {
-        error!(
-            score = result.score,
-            reason = result.evaluation_reason.as_deref().unwrap_or(""),
-            "Document expansion FAILED qualification"
-        );
-        anyhow::bail!(
-            "Generated content did not meet the quality threshold (Score: {}, Min: {})",
-            result.score,
-            config.limits.min_score
-        );
-    }
+    handle_report(&app_config, report, args.output).await?;
 
     Ok(())
 }
 
+fn build_runtime(app_config: &AppConfig) -> anyhow::Result<AgentRuntime> {
+    let http = reqwest::Client::builder()
+        .user_agent(&app_config.observability.user_agent)
+        .build()?;
+    let formatter = app_config.prompt_formatter();
+    let system_prompt = formatter.system_prompt().to_owned();
+
+    let planner_model = build_model(http.clone(), app_config.providers.generator.clone(), &system_prompt)?;
+    let generator_model =
+        build_model(http.clone(), app_config.providers.generator.clone(), &system_prompt)?;
+    let evaluator_model =
+        build_model(http.clone(), app_config.providers.evaluator.clone(), &system_prompt)?;
+    let refiner_model = build_model(http.clone(), app_config.providers.generator.clone(), &system_prompt)?;
+
+    let search_provider = build_search_provider(app_config, &http)?;
+    let fetcher = Arc::new(DiskCacheSourceFetcher::new(
+        WebPageSourceFetcher::new(
+            http,
+            app_config.generation.source_tokens * 4,
+            app_config.observability.fetch_timeout_secs,
+        ),
+        &app_config.cache.dir,
+        app_config.cache.max_age_days,
+    )) as Arc<dyn agent_kernel::SourceFetcher>;
+
+    AgentRuntime::builder(RuntimeSettings {
+        min_score: app_config.runtime.min_score,
+        global_timeout_secs: app_config.runtime.global_timeout_secs,
+    })
+    .with_planner(Arc::new(DocxPlanner::new(
+        Some(planner_model),
+        formatter.clone(),
+        &app_config.research,
+        app_config.runtime.max_refinement_rounds,
+    )))
+    .with_researcher(Arc::new(DefaultResearcher::new(
+        fetcher,
+        search_provider,
+        ResearchSettings {
+            search_max_results: app_config.research.max_search_results,
+            fetch_concurrency_limit: app_config.research.fetch_concurrency_limit,
+        },
+    )))
+    .with_generator(Arc::new(DocxGenerator::new(generator_model, formatter.clone())))
+    .with_evaluator(Arc::new(DocxEvaluator::new(evaluator_model, formatter.clone())))
+    .with_refiner(Arc::new(DocxRefiner::new(refiner_model, formatter)))
+    .build()
+    .map_err(Into::into)
+}
+
+fn build_model(
+    http: reqwest::Client,
+    config: agent_adapters::LlmProviderConfig,
+    system_prompt: &str,
+) -> anyhow::Result<Arc<dyn LanguageModel>> {
+    Ok(Arc::new(build_openrouter_model(
+        http,
+        config,
+        system_prompt.to_owned(),
+    )?))
+}
+
+fn build_search_provider(
+    app_config: &AppConfig,
+    http: &reqwest::Client,
+) -> anyhow::Result<Option<Arc<dyn agent_kernel::SearchProvider>>> {
+    let Some(search) = &app_config.providers.search else {
+        return Ok(None);
+    };
+
+    if search.provider != "tavily" {
+        anyhow::bail!("unsupported search provider `{}`", search.provider);
+    }
+
+    Ok(Some(Arc::new(TavilySearchProvider::new(
+        http.clone(),
+        &search.api_key,
+        app_config.generation.source_tokens * 4,
+        app_config.observability.search_timeout_secs,
+    )) as Arc<dyn agent_kernel::SearchProvider>))
+}
+
+async fn run_task(runtime: &AgentRuntime, args: &ExpandArgs) -> anyhow::Result<RunReport> {
+    let document = docx_domain::DocxDocumentParser
+        .parse_path(&args.doc)
+        .map_err(|error| anyhow::anyhow!("failed to parse document: {error}"))?;
+
+    runtime
+        .run(Task {
+            prompt: args.prompt.clone(),
+            document,
+            user_urls: args.urls.clone(),
+            constraints: RunConstraints::default(),
+        })
+        .await
+        .map_err(Into::into)
+}
+
+async fn handle_report(
+    app_config: &AppConfig,
+    report: RunReport,
+    output: Option<PathBuf>,
+) -> anyhow::Result<()> {
+    if report.qualified {
+        info!(
+            score = report.final_score,
+            reason = report.final_reason.as_deref().unwrap_or(""),
+            attempts = report.attempts.len(),
+            "document expansion qualified"
+        );
+        if let Some(output) = output {
+            tokio::fs::write(&output, &report.final_output)
+                .await
+                .with_context(|| format!("failed to write output file {}", output.display()))?;
+            info!(output = %output.display(), "wrote expansion output");
+        } else {
+            println!("{}", report.final_output);
+        }
+        return Ok(());
+    }
+
+    error!(
+        score = report.final_score,
+        reason = report.final_reason.as_deref().unwrap_or(""),
+        attempts = report.attempts.len(),
+        "document expansion failed qualification"
+    );
+    anyhow::bail!(
+        "Generated content did not meet the quality threshold (Score: {}, Min: {})",
+        report.final_score,
+        app_config.runtime.min_score
+    )
+}
+
 fn init_tracing() -> anyhow::Result<()> {
     let filter = EnvFilter::try_from_default_env()
-        .or_else(|_| EnvFilter::try_new("docx_agent=info,docx_cli=info,rig=info"))?;
+        .or_else(|_| EnvFilter::try_new("agent_runtime=info,docx_cli=info,rig=info"))?;
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(false)

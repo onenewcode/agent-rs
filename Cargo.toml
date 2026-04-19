@@ -1,10 +1,10 @@
 [workspace]
 members = [
     "apps/docx-cli",
-    "crates/agent-core",
-    "crates/docx-agent",
-    "crates/evaluator-agent",
-    "crates/orchestrator",
+    "crates/agent-kernel",
+    "crates/agent-runtime",
+    "crates/docx-domain",
+    "crates/agent-adapters",
 ]
 resolver = "2"
 

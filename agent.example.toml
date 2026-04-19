@@ -1,40 +1,45 @@
-[generator.llm]
+[runtime]
+min_score = 80
+global_timeout_secs = 180
+max_refinement_rounds = 2
+
+[research]
+max_search_results = 5
+fetch_concurrency_limit = 5
+
+[generation]
+document_tokens = 4000
+source_tokens = 2000
+max_total_tokens = 128000
+
+[cache]
+dir = ".agent-cache"
+max_age_days = 7
+
+[observability]
+user_agent = "agent-rs-docx-agent/0.2"
+fetch_timeout_secs = 20
+search_timeout_secs = 30
+
+[providers.generator]
 provider = "openrouter"
 model = "minimax/minimax-m2.5:free"
 api_key = "replace-with-openrouter-api-key"
 
-[generator.prompts]
-# Optional overrides for generator prompts
-# system = "..."
-# generation = "..."
-# outline = "..."
-
-[evaluator.llm]
+[providers.evaluator]
 provider = "openrouter"
 model = "qwen/qwen3-coder:free"
 api_key = "replace-with-openrouter-api-key"
 
-[evaluator.prompts]
-# Optional overrides for evaluator prompts
-# system = "..."
-# evaluation = "..."
-# refinement = "..."
-
-[search]
+[providers.search]
 provider = "tavily"
 api_key = "replace-with-tavily-api-key"
-max_results = 5
-timeout_secs = 30
 
-[limits]
-document_tokens = 4000
-source_tokens = 2000
-global_timeout_secs = 180
-min_score = 80
-
-[fetch]
-user_agent = "agent-rs-docx-agent/0.1"
-concurrency_limit = 5
-timeout_secs = 20
-cache_dir = ".agent-cache"
-max_cache_age_days = 7
+[docx.prompts]
+# Optional overrides for stage prompts
+# system = "..."
+# planning = "..."
+# outline = "..."
+# generation = "..."
+# evaluation = "..."
+# refinement = "..."

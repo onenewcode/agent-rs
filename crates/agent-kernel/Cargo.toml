@@ -1,8 +1,7 @@
 [package]
-name = "agent-core"
+name = "agent-kernel"
 version.workspace = true
 edition.workspace = true
-
 
 [dependencies]
 serde.workspace = true

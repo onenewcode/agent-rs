@@ -14,13 +14,12 @@
 - **Serde**: For serialization and configuration.
 
 ### Architecture
-The workspace is divided into three main components:
-- **`crates/agent-core`**: Defines shared traits (`LlmBackend`, `SearchBackend`, `UrlFetcher`, `DocumentParser`) and data models (`ParsedDocument`, `ExpansionRequest`, `ExpansionResult`).
-- **`crates/docx-agent`**: Implements the document expansion logic. Includes:
-    - `DocxDocumentParser`: Extracts text, headings, and tables from DOCX files.
-    - `WebPageFetcher`: Fetches and cleans web content with disk-based caching.
-    - `DocxExpansionService`: Orchestrates the expansion pipeline (Research -> Outline -> Generation).
-- **`apps/docx-cli`**: A command-line interface for interacting with the expansion service.
+The workspace is divided into five main components:
+- **`crates/agent-kernel`**: Defines stable runtime contracts (`Planner`, `Researcher`, `Generator`, `Evaluator`, `Refiner`, `SearchProvider`, `SourceFetcher`) and shared data models (`Task`, `Plan`, `Draft`, `Evaluation`, `RunReport`).
+- **`crates/agent-runtime`**: Runs the explicit workflow (`plan -> research -> generate -> evaluate -> refine`) and records stage-level telemetry.
+- **`crates/docx-domain`**: Owns DOCX parsing, token budgeting, and prompt rendering for DOCX-centered tasks.
+- **`crates/agent-adapters`**: Implements OpenRouter, Tavily, webpage fetching, caching, and DOCX-specific stage components.
+- **`apps/docx-cli`**: A thin command-line composition root for loading config, wiring adapters, and executing the runtime.
 
 ---
 
@@ -49,8 +48,9 @@ The workspace is divided into three main components:
 
 ### Configuration
 The project uses a TOML configuration file. An example is provided in `agent.example.toml`. Copy it to `agent.toml` and add your API keys:
-- `llm.api_key`: OpenRouter API key.
-- `search.api_key`: Tavily API key (optional).
+- `providers.generator.api_key`: OpenRouter API key for planning/generation/refinement.
+- `providers.evaluator.api_key`: OpenRouter API key for evaluation.
+- `providers.search.api_key`: Tavily API key (optional).
 
 ---
 
@@ -63,10 +63,10 @@ The project uses a TOML configuration file. An example is provided in `agent.exa
 - **Lints**: The project enforces strict lints via `clippy::pedantic` and forbids `unsafe_code` by default (warn).
 
 ### Testing Practices
-- **Unit Tests**: Located within each module (e.g., `src/infrastructure/docx.rs`).
-- **Integration Tests**: Orchestration tests are in `DocxExpansionService::tests`.
+- **Unit Tests**: Located within each module.
+- **Runtime Tests**: Workflow loop coverage is in `agent-runtime`.
 - **Documentation**: Keep `docs/` and generated documentation in sync using `.harness/sync.py`.
 
 ### Edit Guardrails
 - **Generated Files**: Never hand-edit files in `target/generated-preview/` or other generated documentation. Rerun `uv run .harness/sync.py`.
-- **Crate Boundaries**: Keep `agent-core` lean and free of heavy dependencies; move implementation details to `docx-agent`.
+- **Crate Boundaries**: Keep `agent-kernel` dependency-light and stable; keep provider and IO details in `agent-adapters`.

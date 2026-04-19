@@ -1,9 +1,12 @@
 [package]
-name = "orchestrator"
+name = "agent-runtime"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
-agent-core = { path = "../agent-core" }
+agent-kernel = { path = "../agent-kernel" }
 tokio.workspace = true
 tracing.workspace = true
+
+[lints]
+workspace = true

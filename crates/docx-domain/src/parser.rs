@@ -1,9 +1,9 @@
 use std::{fs::File, io::Read, path::Path};
 
-use agent_core::{BlockKind, DocumentBlock, DocumentParser, ParsedDocument, normalize_whitespace};
+use agent_kernel::{
+    BlockKind, Document, DocumentBlock, DocumentParser, RunError, normalize_whitespace,
+};
 use tracing::{debug, info};
-
-use crate::error::DocxAgentError;
 
 const WORD_NAMESPACE: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
 
@@ -11,15 +11,18 @@ const WORD_NAMESPACE: &str = "http://schemas.openxmlformats.org/wordprocessingml
 pub struct DocxDocumentParser;
 
 impl DocxDocumentParser {
-    pub fn parse(path: &Path) -> Result<ParsedDocument, DocxAgentError> {
+    pub fn parse(path: &Path) -> Result<Document, RunError> {
         info!(doc = %path.display(), "parsing DOCX document");
 
-        let file = File::open(path)?;
-        let mut archive = zip::ZipArchive::new(file)?;
+        let file = File::open(path).map_err(|error| RunError::Parse(error.to_string()))?;
+        let mut archive =
+            zip::ZipArchive::new(file).map_err(|error| RunError::Parse(error.to_string()))?;
         let mut xml = String::new();
         archive
-            .by_name("word/document.xml")?
-            .read_to_string(&mut xml)?;
+            .by_name("word/document.xml")
+            .map_err(|error| RunError::Parse(error.to_string()))?
+            .read_to_string(&mut xml)
+            .map_err(|error| RunError::Parse(error.to_string()))?;
 
         let parsed = Self::parse_xml(&xml)?;
         info!(
@@ -32,14 +35,15 @@ impl DocxDocumentParser {
         Ok(parsed)
     }
 
-    fn parse_xml(xml: &str) -> Result<ParsedDocument, DocxAgentError> {
-        let document = roxmltree::Document::parse(xml)?;
+    fn parse_xml(xml: &str) -> Result<Document, RunError> {
+        let document =
+            roxmltree::Document::parse(xml).map_err(|error| RunError::Parse(error.to_string()))?;
         let mut blocks = Vec::new();
 
         let body = document
             .descendants()
             .find(|node| is_word_node(node, "body"))
-            .ok_or(DocxAgentError::EmptyDocument)?;
+            .ok_or_else(|| RunError::Parse("document body missing".to_owned()))?;
 
         for node in body.children().filter(roxmltree::Node::is_element) {
             if is_word_node(&node, "p") {
@@ -67,7 +71,9 @@ impl DocxDocumentParser {
         }
 
         if blocks.is_empty() {
-            return Err(DocxAgentError::EmptyDocument);
+            return Err(RunError::Parse(
+                "document is empty after parsing".to_owned(),
+            ));
         }
 
         let title = blocks.iter().find_map(|block| match block.kind {
@@ -75,13 +81,13 @@ impl DocxDocumentParser {
             _ => None,
         });
 
-        Ok(ParsedDocument { title, blocks })
+        Ok(Document { title, blocks })
     }
 }
 
 impl DocumentParser for DocxDocumentParser {
-    fn parse_path(&self, path: &Path) -> Result<ParsedDocument, agent_core::ExpansionError> {
-        Self::parse(path).map_err(|e| agent_core::ExpansionError::Parse(e.to_string()))
+    fn parse_path(&self, path: &Path) -> Result<Document, RunError> {
+        Self::parse(path)
     }
 }
 
@@ -146,10 +152,9 @@ fn extract_table_markdown(node: roxmltree::Node<'_, '_>) -> Option<String> {
     let mut out = String::new();
     let max_cols = rows.iter().map(Vec::len).max().unwrap_or(0);
 
-    for (i, row) in rows.iter().enumerate() {
+    for (index, row) in rows.iter().enumerate() {
         out.push_str("| ");
         out.push_str(&row.join(" | "));
-        // Pad row if it has fewer columns than max
         if row.len() < max_cols {
             for _ in 0..(max_cols - row.len()) {
                 out.push_str(" | ");
@@ -157,7 +162,7 @@ fn extract_table_markdown(node: roxmltree::Node<'_, '_>) -> Option<String> {
         }
         out.push_str(" |\n");
 
-        if i == 0 {
+        if index == 0 {
             out.push_str("| ");
             for _ in 0..max_cols {
                 out.push_str("--- | ");
@@ -186,11 +191,10 @@ fn heading_level(style: &str) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::DocxDocumentParser;
-    use crate::error::DocxAgentError;
-    use agent_core::BlockKind;
+    use agent_kernel::BlockKind;
 
     #[test]
-    fn parses_headings_and_paragraphs_from_document_xml() -> Result<(), DocxAgentError> {
+    fn parses_headings_and_paragraphs_from_document_xml() -> Result<(), agent_kernel::RunError> {
         let xml = r#"
             <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
               <w:body>
@@ -215,7 +219,7 @@ mod tests {
     }
 
     #[test]
-    fn keeps_split_word_runs_contiguous() -> Result<(), DocxAgentError> {
+    fn keeps_split_word_runs_contiguous() -> Result<(), agent_kernel::RunError> {
         let xml = r#"
             <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
               <w:body>
