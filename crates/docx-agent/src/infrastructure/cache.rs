@@ -120,9 +120,9 @@ async fn prune_stale_cache(cache_dir: &Path, max_age_days: u64) -> Result<(), Bo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
     use agent_core::SourceKind;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct MockFetcher(Arc<AtomicUsize>);
     impl UrlFetcher for MockFetcher {
@@ -144,7 +144,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_disk_cache_enforces_expiration() -> Result<(), BoxError> {
-        let temp_dir = std::env::temp_dir().join(format!("agent-cache-test-{}", SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?.as_millis()));
+        let temp_dir = std::env::temp_dir().join(format!(
+            "agent-cache-test-{}",
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)?
+                .as_millis()
+        ));
         let url = "https://example.com/stale";
         let call_count = Arc::new(AtomicUsize::new(0));
         let fetcher = DiskCacheFetcher::new(MockFetcher(call_count.clone()), &temp_dir, 1);
@@ -162,7 +167,10 @@ mod tests {
         // 3. Manually backdate the cache file to make it stale (2 days old)
         let cache_path = fetcher.cache_path(url);
         let stale_time = SystemTime::now() - Duration::from_hours(48);
-        filetime::set_file_mtime(&cache_path, filetime::FileTime::from_system_time(stale_time))?;
+        filetime::set_file_mtime(
+            &cache_path,
+            filetime::FileTime::from_system_time(stale_time),
+        )?;
 
         // 4. Fetch again (cache expired, should refetch)
         let res3 = fetcher.fetch(url).await?;

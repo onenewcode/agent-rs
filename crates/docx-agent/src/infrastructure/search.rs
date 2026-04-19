@@ -58,9 +58,9 @@ impl TavilySearchClient {
                 response_preview = %truncate_for_log(&body),
                 "Tavily failure response preview"
             );
-            return Err(DocxAgentError::Agent(
-                agent_core::ExpansionError::Provider(format!("tavily search failed with status {status}")),
-            ));
+            return Err(DocxAgentError::Agent(agent_core::ExpansionError::Provider(
+                format!("tavily search failed with status {status}"),
+            )));
         }
 
         let payload: TavilySearchResponse = serde_json::from_str(&body).map_err(|error| {
@@ -71,7 +71,9 @@ impl TavilySearchClient {
                 response_preview = %truncate_for_log(&body),
                 "Tavily parse failure response preview"
             );
-            DocxAgentError::Agent(agent_core::ExpansionError::Provider(format!("failed to parse Tavily response: {error}")))
+            DocxAgentError::Agent(agent_core::ExpansionError::Provider(format!(
+                "failed to parse Tavily response: {error}"
+            )))
         })?;
 
         let results: Vec<FetchedSource> = payload

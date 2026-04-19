@@ -14,7 +14,10 @@ pub struct EvaluationStep {
 impl EvaluationStep {
     #[must_use]
     pub fn new(evaluator: Arc<dyn EvaluatorRuntime>, min_score: u8) -> Self {
-        Self { evaluator, min_score }
+        Self {
+            evaluator,
+            min_score,
+        }
     }
 }
 
@@ -28,11 +31,12 @@ impl Step for EvaluationStep {
         request: &'a mut ExpansionRequest,
         current_result: Option<ExpansionResult>,
         research: Option<ResearchResult>,
-    ) -> BoxFuture<'a, Result<(Option<ExpansionResult>, Option<ResearchResult>), ExpansionError>> {
+    ) -> BoxFuture<'a, Result<(Option<ExpansionResult>, Option<ResearchResult>), ExpansionError>>
+    {
         let evaluator = Arc::clone(&self.evaluator);
         let min_score = self.min_score;
         let prompt = request.prompt.clone();
-        
+
         Box::pin(async move {
             info!("Starting evaluation step");
             let mut result = current_result.ok_or_else(|| {
@@ -42,11 +46,14 @@ impl Step for EvaluationStep {
                 ExpansionError::Internal("Evaluation step requires research results".to_owned())
             })?;
 
-            match evaluator.evaluate(EvaluationRequest {
-                prompt,
-                content: result.content.clone(),
-                sources: research.sources.clone(),
-            }).await {
+            match evaluator
+                .evaluate(EvaluationRequest {
+                    prompt,
+                    content: result.content.clone(),
+                    sources: research.sources.clone(),
+                })
+                .await
+            {
                 Ok(evaluation) => {
                     result.score = evaluation.score;
                     result.evaluation_reason = Some(evaluation.reason);

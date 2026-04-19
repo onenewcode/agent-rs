@@ -108,7 +108,11 @@ fn extract_body_text(document: &Html) -> Option<String> {
         let mut raw = String::new();
         collect_raw_text(body, &mut raw);
         let normalized = normalize_whitespace(&raw);
-        return if normalized.is_empty() { None } else { Some(normalized) };
+        return if normalized.is_empty() {
+            None
+        } else {
+            Some(normalized)
+        };
     }
 
     Some(normalize_whitespace(&high_density_blocks.join(" ")))
@@ -135,7 +139,7 @@ fn find_content_blocks(element: ElementRef<'_>, out: &mut Vec<TextBlock>) {
                 link_text_len: link_len,
             });
         }
-        
+
         // Even if this is a block, continue searching children for more specific blocks
         for child in element.children() {
             if let Some(child_element) = ElementRef::wrap(child) {
@@ -172,7 +176,7 @@ fn collect_block_stats(element: ElementRef<'_>, text_out: &mut String, link_len_
             collect_block_stats(child_element, text_out, link_len_out);
         }
     }
-    
+
     if is_block && !text_out.ends_with(char::is_whitespace) {
         text_out.push(' ');
     }
