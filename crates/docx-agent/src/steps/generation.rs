@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use agent_core::{
-    BoxFuture, ExpansionError, ExpansionRequest, ExpansionResult, ExpansionRuntime,
-    ResearchResult, Step,
+    BoxFuture, ExpansionError, ExpansionRequest, ExpansionResult, ExpansionRuntime, ResearchResult,
+    Step,
 };
 use tracing::info;
 
@@ -27,10 +27,11 @@ impl Step for GenerationStep {
         request: &'a mut ExpansionRequest,
         _current_result: Option<ExpansionResult>,
         research: Option<ResearchResult>,
-    ) -> BoxFuture<'a, Result<(Option<ExpansionResult>, Option<ResearchResult>), ExpansionError>> {
+    ) -> BoxFuture<'a, Result<(Option<ExpansionResult>, Option<ResearchResult>), ExpansionError>>
+    {
         let runtime = Arc::clone(&self.runtime);
         let request_clone = request.clone();
-        
+
         Box::pin(async move {
             info!("Starting generation step");
             let research = research.ok_or_else(|| {

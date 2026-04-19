@@ -3,8 +3,8 @@ use std::time::Duration;
 use rig::{client::CompletionClient, completion::Prompt, providers::openrouter};
 use tracing::{info, warn};
 
-use agent_core::config::LlmConfig;
 use crate::error::DocxAgentError;
+use agent_core::config::LlmConfig;
 
 const RETRYABLE_ERROR_PATTERNS: &[&str] = &[
     "429",
@@ -34,17 +34,12 @@ impl<P: Prompt> agent_core::LlmBackend for RigLlmBackend<P> {
     ) -> agent_core::BoxFuture<'_, Result<String, agent_core::ExpansionError>> {
         let prompt = prompt.to_owned();
         Box::pin(async move {
-            generate_with_retry(
-                &self.agent,
-                &prompt,
-                &self.config,
-                self.max_attempts,
-            )
-            .await
-            .map_err(|e| match e {
-                DocxAgentError::Agent(inner) => inner,
-                _ => agent_core::ExpansionError::Internal(e.to_string()),
-            })
+            generate_with_retry(&self.agent, &prompt, &self.config, self.max_attempts)
+                .await
+                .map_err(|e| match e {
+                    DocxAgentError::Agent(inner) => inner,
+                    _ => agent_core::ExpansionError::Internal(e.to_string()),
+                })
         })
     }
 }
@@ -61,17 +56,12 @@ pub(crate) fn build_agent(
         .http_client(http)
         .build()
         .map_err(|error| {
-            DocxAgentError::Agent(
-                agent_core::ExpansionError::Provider(format!(
-                    "failed to build OpenRouter client: {error}"
-                )),
-            )
+            DocxAgentError::Agent(agent_core::ExpansionError::Provider(format!(
+                "failed to build OpenRouter client: {error}"
+            )))
         })?;
 
-    let agent = client
-        .agent(&config.model)
-        .preamble(&system_prompt)
-        .build();
+    let agent = client.agent(&config.model).preamble(&system_prompt).build();
 
     Ok(RigLlmBackend {
         agent,
@@ -107,14 +97,16 @@ pub(crate) async fn generate_with_retry(
                     continue;
                 }
 
-                return Err(DocxAgentError::Agent(agent_core::ExpansionError::Provider(message)));
+                return Err(DocxAgentError::Agent(agent_core::ExpansionError::Provider(
+                    message,
+                )));
             }
         }
     }
 
-    Err(DocxAgentError::Agent(
-        agent_core::ExpansionError::Provider("OpenRouter generation exhausted retries".to_owned()),
-    ))
+    Err(DocxAgentError::Agent(agent_core::ExpansionError::Provider(
+        "OpenRouter generation exhausted retries".to_owned(),
+    )))
 }
 
 fn log_telemetry(config: &LlmConfig, input: &str, output: &str) {
@@ -150,7 +142,10 @@ pub(crate) async fn generate_optimized_search_query(
 
     info!(model = %model_name, "generating optimized search query via LLM");
 
-    let query = agent.prompt(&generation_prompt).await.map_err(DocxAgentError::Agent)?;
+    let query = agent
+        .prompt(&generation_prompt)
+        .await
+        .map_err(DocxAgentError::Agent)?;
     let trimmed = query.trim().trim_matches('"').to_owned();
 
     info!(query = %trimmed, "LLM generated optimized search query");

@@ -213,8 +213,11 @@ impl DocxExpansionService {
         };
 
         let timeout_dur = Duration::from_secs(self.config.search.timeout_secs);
-        let results = if let Ok(res) =
-            timeout(timeout_dur, backend.search(&query, self.config.search.max_results)).await
+        let results = if let Ok(res) = timeout(
+            timeout_dur,
+            backend.search(&query, self.config.search.max_results),
+        )
+        .await
         {
             res?
         } else {
@@ -250,7 +253,10 @@ impl DocxExpansionService {
         );
 
         info!(model = %self.config.generator.llm.model, "generating expansion outline");
-        let outline = agent.prompt(&outline_prompt).await.map_err(DocxAgentError::Agent)?;
+        let outline = agent
+            .prompt(&outline_prompt)
+            .await
+            .map_err(DocxAgentError::Agent)?;
 
         // Phase 2: Generate Final Content
         let prompt_text = domain::render_generation_prompt(
@@ -268,7 +274,10 @@ impl DocxExpansionService {
             "sending final generation request"
         );
 
-        agent.prompt(&prompt_text).await.map_err(DocxAgentError::Agent)
+        agent
+            .prompt(&prompt_text)
+            .await
+            .map_err(DocxAgentError::Agent)
     }
 }
 
@@ -289,7 +298,9 @@ impl ResearchRuntime for DocxExpansionService {
             let mut search_queries = Vec::new();
 
             if let Some((query, results)) = search_sources_res.map_err(|e| {
-                agent_core::ExpansionError::Internal(format!("Search sources collection failed: {e}"))
+                agent_core::ExpansionError::Internal(format!(
+                    "Search sources collection failed: {e}"
+                ))
             })? {
                 search_queries.push(query);
                 sources.extend(results);
@@ -358,7 +369,10 @@ mod tests {
 
     struct MockUrlFetcher;
     impl UrlFetcher for MockUrlFetcher {
-        fn fetch(&self, url: &str) -> BoxFuture<'_, Result<FetchedSource, agent_core::ExpansionError>> {
+        fn fetch(
+            &self,
+            url: &str,
+        ) -> BoxFuture<'_, Result<FetchedSource, agent_core::ExpansionError>> {
             let url = url.to_owned();
             Box::pin(async move {
                 Ok(FetchedSource {
@@ -473,12 +487,16 @@ mod tests {
         assert_eq!(result.content, "Mock Final Content");
         assert_eq!(result.sources.len(), 1); // Only user URL, no search
 
-        let user_sources = service.collect_user_sources(&request.user_urls).await
+        let user_sources = service
+            .collect_user_sources(&request.user_urls)
+            .await
             .map_err(|e| agent_core::ExpansionError::Internal(e.to_string()))?;
         assert_eq!(user_sources.len(), 1);
         assert_eq!(user_sources[0].url, "https://example.com");
 
-        let search_sources = service.collect_search_sources(&request).await
+        let search_sources = service
+            .collect_search_sources(&request)
+            .await
             .map_err(|e| agent_core::ExpansionError::Internal(e.to_string()))?;
         // "不要联网" should trigger the negative policy
         assert!(search_sources.is_none());

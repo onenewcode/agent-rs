@@ -1,8 +1,8 @@
 use std::{fs, path::Path};
 
+use agent_core::config::{LimitsConfig, LlmConfig, SearchConfig};
 use serde::Deserialize;
 use tracing::info;
-use agent_core::config::{LlmConfig, SearchConfig, LimitsConfig};
 
 use crate::error::DocxAgentError;
 
@@ -267,15 +267,24 @@ impl DocxAgentConfig {
 
 impl GeneratorConfig {
     pub fn system_prompt(&self) -> &str {
-        self.prompts.system.as_deref().unwrap_or(SYSTEM_PROMPT_DEFAULT)
+        self.prompts
+            .system
+            .as_deref()
+            .unwrap_or(SYSTEM_PROMPT_DEFAULT)
     }
 
     pub fn generation_template(&self) -> &str {
-        self.prompts.generation.as_deref().unwrap_or(GENERATION_TEMPLATE_DEFAULT)
+        self.prompts
+            .generation
+            .as_deref()
+            .unwrap_or(GENERATION_TEMPLATE_DEFAULT)
     }
 
     pub fn outline_template(&self) -> &str {
-        self.prompts.outline.as_deref().unwrap_or(OUTLINE_TEMPLATE_DEFAULT)
+        self.prompts
+            .outline
+            .as_deref()
+            .unwrap_or(OUTLINE_TEMPLATE_DEFAULT)
     }
 
     pub fn max_attempts(&self) -> usize {
@@ -285,15 +294,24 @@ impl GeneratorConfig {
 
 impl EvaluatorConfig {
     pub fn system_prompt(&self) -> &str {
-        self.prompts.system.as_deref().unwrap_or(SYSTEM_PROMPT_DEFAULT)
+        self.prompts
+            .system
+            .as_deref()
+            .unwrap_or(SYSTEM_PROMPT_DEFAULT)
     }
 
     pub fn evaluation_template(&self) -> &str {
-        self.prompts.evaluation.as_deref().unwrap_or(EVALUATION_TEMPLATE_DEFAULT)
+        self.prompts
+            .evaluation
+            .as_deref()
+            .unwrap_or(EVALUATION_TEMPLATE_DEFAULT)
     }
 
     pub fn refinement_template(&self) -> &str {
-        self.prompts.refinement.as_deref().unwrap_or(REFINEMENT_TEMPLATE_DEFAULT)
+        self.prompts
+            .refinement
+            .as_deref()
+            .unwrap_or(REFINEMENT_TEMPLATE_DEFAULT)
     }
 
     pub fn max_attempts(&self) -> usize {

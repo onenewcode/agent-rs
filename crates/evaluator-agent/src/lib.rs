@@ -1,4 +1,6 @@
-use agent_core::{BoxFuture, EvaluationRequest, EvaluationResult, EvaluatorRuntime, ExpansionError};
+use agent_core::{
+    BoxFuture, EvaluationRequest, EvaluationResult, EvaluatorRuntime, ExpansionError,
+};
 use rig::completion::Prompt;
 use tracing::{info, warn};
 
@@ -21,8 +23,9 @@ impl<P: Prompt> EvaluatorService<P> {
     fn sanitize_json_response(content: &str) -> String {
         let trimmed = content.trim();
         // Try to find the first { and last } to extract JSON from potentially messy LLM output
-        if let (Some(start), Some(end)) = (trimmed.find('{'), trimmed.rfind('}')) 
-            && start <= end {
+        if let (Some(start), Some(end)) = (trimmed.find('{'), trimmed.rfind('}'))
+            && start <= end
+        {
             return trimmed[start..=end].to_owned();
         }
         trimmed.to_owned()

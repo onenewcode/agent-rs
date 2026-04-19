@@ -1,7 +1,7 @@
 use std::sync::OnceLock;
 
 use agent_core::{ExpansionRequest, FetchedSource};
-use tiktoken_rs::{cl100k_base, CoreBPE};
+use tiktoken_rs::{CoreBPE, cl100k_base};
 
 static TOKENIZER: OnceLock<CoreBPE> = OnceLock::new();
 
@@ -55,7 +55,11 @@ impl ContextBudgeter {
         }
 
         // Allocate 50% to document, 50% to external sources
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_precision_loss)]
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            clippy::cast_precision_loss
+        )]
         let doc_limit = (available as f32 * 0.5) as usize;
         let sources_limit = available.saturating_sub(doc_limit);
         let per_source_limit = sources_limit / sources_count;
@@ -155,7 +159,7 @@ mod tests {
         let budgeter = ContextBudgeter::new(1000);
         // prompt and outline tokens are minimal here
         let (doc_limit, source_limit) = budgeter.allocate_limits("test", None, 1);
-        
+
         // With total 1000, reservation should be capped at 250 (1/4 of 1000)
         // available = 1000 - 250 = 750
         // doc_limit = 750 * 0.5 = 375

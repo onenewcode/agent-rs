@@ -10,7 +10,9 @@ pub struct RefinementStep {
 impl RefinementStep {
     #[must_use]
     pub fn new(refinement_template: String) -> Self {
-        Self { refinement_template }
+        Self {
+            refinement_template,
+        }
     }
 }
 
@@ -24,9 +26,10 @@ impl Step for RefinementStep {
         request: &'a mut ExpansionRequest,
         current_result: Option<ExpansionResult>,
         research: Option<ResearchResult>,
-    ) -> BoxFuture<'a, Result<(Option<ExpansionResult>, Option<ResearchResult>), ExpansionError>> {
+    ) -> BoxFuture<'a, Result<(Option<ExpansionResult>, Option<ResearchResult>), ExpansionError>>
+    {
         let template = self.refinement_template.clone();
-        
+
         Box::pin(async move {
             info!("Starting refinement preparation step");
             let result = current_result.ok_or_else(|| {
@@ -37,7 +40,10 @@ impl Step for RefinementStep {
             let refinement_prompt = template
                 .replace("{prompt}", &request.prompt)
                 .replace("{content}", &result.content)
-                .replace("{reason}", result.evaluation_reason.as_deref().unwrap_or(""));
+                .replace(
+                    "{reason}",
+                    result.evaluation_reason.as_deref().unwrap_or(""),
+                );
 
             request.prompt = refinement_prompt;
 

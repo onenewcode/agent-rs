@@ -147,11 +147,17 @@ pub trait UrlFetcher: Send + Sync {
 }
 
 pub trait EvaluatorRuntime: Send + Sync {
-    fn evaluate(&self, request: EvaluationRequest) -> BoxFuture<'_, Result<EvaluationResult, ExpansionError>>;
+    fn evaluate(
+        &self,
+        request: EvaluationRequest,
+    ) -> BoxFuture<'_, Result<EvaluationResult, ExpansionError>>;
 }
 
 pub trait ResearchRuntime: Send + Sync {
-    fn research(&self, request: ExpansionRequest) -> BoxFuture<'_, Result<ResearchResult, ExpansionError>>;
+    fn research(
+        &self,
+        request: ExpansionRequest,
+    ) -> BoxFuture<'_, Result<ResearchResult, ExpansionError>>;
 }
 
 #[must_use]
@@ -165,8 +171,11 @@ pub fn normalize_whitespace(value: &str) -> String {
 }
 
 pub trait ExpansionRuntime: Send + Sync {
-    fn expand(&self, request: ExpansionRequest) -> BoxFuture<'_, Result<ExpansionResult, ExpansionError>>;
-    
+    fn expand(
+        &self,
+        request: ExpansionRequest,
+    ) -> BoxFuture<'_, Result<ExpansionResult, ExpansionError>>;
+
     fn generate(
         &self,
         request: ExpansionRequest,
@@ -182,6 +191,49 @@ pub trait Step: Send + Sync {
         current_result: Option<ExpansionResult>,
         research: Option<ResearchResult>,
     ) -> BoxFuture<'a, Result<(Option<ExpansionResult>, Option<ResearchResult>), ExpansionError>>;
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PipelineState {
+    current_result: Option<ExpansionResult>,
+    current_research: Option<ResearchResult>,
+}
+
+impl PipelineState {
+    #[must_use]
+    pub fn new(
+        current_result: Option<ExpansionResult>,
+        current_research: Option<ResearchResult>,
+    ) -> Self {
+        Self {
+            current_result,
+            current_research,
+        }
+    }
+
+    #[must_use]
+    pub fn result(&self) -> Option<&ExpansionResult> {
+        self.current_result.as_ref()
+    }
+
+    #[must_use]
+    pub fn research(&self) -> Option<&ResearchResult> {
+        self.current_research.as_ref()
+    }
+
+    #[must_use]
+    pub fn into_retry_state(self) -> Self {
+        Self {
+            current_result: None,
+            current_research: self.current_research,
+        }
+    }
+
+    pub fn into_result(self) -> Result<ExpansionResult, ExpansionError> {
+        self.current_result.ok_or_else(|| {
+            ExpansionError::Internal("Pipeline finished without a result".to_owned())
+        })
+    }
 }
 
 pub struct Pipeline {
@@ -202,20 +254,29 @@ impl Pipeline {
         &self,
         request: &mut ExpansionRequest,
     ) -> Result<ExpansionResult, ExpansionError> {
-        let mut current_result: Option<ExpansionResult> = None;
-        let mut current_research: Option<ResearchResult> = None;
+        self.run_with_state(request, PipelineState::default())
+            .await?
+            .into_result()
+    }
 
+    pub async fn run_with_state(
+        &self,
+        request: &mut ExpansionRequest,
+        mut state: PipelineState,
+    ) -> Result<PipelineState, ExpansionError> {
         for step in &self.steps {
             let (next_result, next_research) = step
-                .execute(request, current_result.take(), current_research.take())
+                .execute(
+                    request,
+                    state.current_result.take(),
+                    state.current_research.take(),
+                )
                 .await?;
-            current_result = next_result;
-            current_research = next_research;
+            state.current_result = next_result;
+            state.current_research = next_research;
         }
 
-        current_result.ok_or_else(|| {
-            ExpansionError::Internal("Pipeline finished without a result".to_owned())
-        })
+        Ok(state)
     }
 }
 

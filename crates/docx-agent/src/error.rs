@@ -29,10 +29,7 @@ pub enum DocxAgentError {
     #[error("document is empty after parsing")]
     EmptyDocument,
     #[error("research error ({kind}): {message}")]
-    ResearchError {
-        kind: &'static str,
-        message: String,
-    },
+    ResearchError { kind: &'static str, message: String },
     #[error("agent execution failed: {0}")]
     Agent(#[from] agent_core::ExpansionError),
 }
