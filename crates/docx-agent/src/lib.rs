@@ -1,10 +1,11 @@
 #![allow(clippy::missing_errors_doc)]
 
-mod application;
-mod config;
-mod domain;
-mod error;
-mod infrastructure;
+pub mod application;
+pub mod config;
+pub mod domain;
+pub mod error;
+pub mod infrastructure;
+pub mod steps;
 
 pub use application::DocxExpansionService;
 pub use config::{DocxAgentConfig, SearchPolicyConfig};
