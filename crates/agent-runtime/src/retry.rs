@@ -11,20 +11,22 @@ pub struct RetryPolicy {
 impl Default for RetryPolicy {
     fn default() -> Self {
         Self {
-            max_attempts: 1,
-            base_delay_ms: 1000,
+            max_attempts: 3,
+            base_delay_ms: 2000,
         }
     }
 }
 
-pub async fn retry_with_backoff<T, F, Fut>(
+pub async fn retry_with_backoff<T, F, Fut, C>(
     name: &str,
     policy: &RetryPolicy,
     mut f: F,
+    is_retryable: C,
 ) -> Result<T, RunError>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T, RunError>>,
+    C: Fn(&RunError) -> bool,
 {
     let mut attempts = 0;
     loop {
@@ -32,7 +34,7 @@ where
         match f().await {
             Ok(val) => return Ok(val),
             Err(error) => {
-                if attempts < policy.max_attempts {
+                if attempts < policy.max_attempts && is_retryable(&error) {
                     let delay =
                         policy.base_delay_ms * (2u64.pow(u32::try_from(attempts - 1).unwrap_or(0)));
                     warn!(

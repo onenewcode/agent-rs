@@ -1,5 +1,7 @@
 [runtime]
 default_timeout_secs = 180
+max_iterations = 3
+retry_attempts = 2
 capture_artifacts = true
 
 [services.http]

@@ -58,34 +58,3 @@ pub struct DocxExpandRequest {
     #[serde(default)]
     pub source_policy: DocxSourcePolicy,
 }
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DocxDraft {
-    pub content: String,
-    pub outline: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DocxEvaluation {
-    pub score: u8,
-    pub reason: String,
-    pub qualified: bool,
-    pub faithfulness_score: u8,
-    pub relevance_score: u8,
-    pub accuracy_score: u8,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DocxAttemptRecord {
-    pub attempt: usize,
-    pub draft: DocxDraft,
-    pub evaluation: DocxEvaluation,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DocxFinalOutput {
-    pub markdown: String,
-    pub score: u8,
-    pub qualified: bool,
-    pub reason: String,
-}

@@ -28,6 +28,7 @@ impl AppConfig {
 pub struct RuntimeConfig {
     pub default_timeout_secs: u64,
     pub max_iterations: usize,
+    pub retry_attempts: Option<usize>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -121,7 +122,14 @@ impl PlatformApp {
             config.docx_expand.min_score,
         ));
 
-        let orchestrator = AgentOrchestrator::new(writer, reviewer, config.runtime.max_iterations);
+        let mut orchestrator = AgentOrchestrator::new(writer, reviewer, config.runtime.max_iterations);
+
+        if let Some(attempts) = config.runtime.retry_attempts {
+            orchestrator = orchestrator.with_retry_policy(agent_runtime::RetryPolicy {
+                max_attempts: attempts,
+                base_delay_ms: 2000,
+            });
+        }
 
         Ok(Self { orchestrator })
     }

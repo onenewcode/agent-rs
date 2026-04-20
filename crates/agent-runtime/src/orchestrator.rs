@@ -6,10 +6,13 @@ use agent_kernel::{
 };
 use crate::generate_run_id;
 
+use crate::retry::{RetryPolicy, retry_with_backoff};
+
 pub struct AgentOrchestrator {
     writer: Arc<dyn AutonomousAgent>,
     reviewer: Arc<dyn AutonomousAgent>,
     max_iterations: usize,
+    retry_policy: RetryPolicy,
 }
 
 impl AgentOrchestrator {
@@ -22,7 +25,14 @@ impl AgentOrchestrator {
             writer,
             reviewer,
             max_iterations,
+            retry_policy: RetryPolicy::default(),
         }
+    }
+
+    #[must_use]
+    pub fn with_retry_policy(mut self, policy: RetryPolicy) -> Self {
+        self.retry_policy = policy;
+        self
     }
 
     pub async fn run(
@@ -44,11 +54,34 @@ impl AgentOrchestrator {
         };
 
         for i in 0..self.max_iterations {
-            tracing::info!(iteration = i + 1, "Starting Writer turn");
-            self.writer.run(&session).await?;
+            let iteration = i + 1;
+            tracing::info!(iteration, "Starting Writer turn");
 
-            tracing::info!(iteration = i + 1, "Starting Reviewer turn");
-            self.reviewer.run(&session).await?;
+            retry_with_backoff(
+                &format!("Writer turn (iteration {iteration})"),
+                &self.retry_policy,
+                || self.writer.run(&session),
+                agent_kernel::RunError::is_retryable,
+            )
+            .await
+            .map_err(|e| {
+                tracing::error!(agent = self.writer.role(), iteration, error = %e, "Writer agent failed critically");
+                RunError::Provider(format!("{} agent failed: {}", self.writer.role(), e))
+            })?;
+
+            tracing::info!(iteration, "Starting Reviewer turn");
+
+            retry_with_backoff(
+                &format!("Reviewer turn (iteration {iteration})"),
+                &self.retry_policy,
+                || self.reviewer.run(&session),
+                agent_kernel::RunError::is_retryable,
+            )
+            .await
+            .map_err(|e| {
+                tracing::error!(agent = self.reviewer.role(), iteration, error = %e, "Reviewer agent failed critically");
+                RunError::Provider(format!("{} agent failed: {}", self.reviewer.role(), e))
+            })?;
 
             let ctx = context.read().await;
             if ctx.feedback_history.last().is_some_and(|f| f.passed) {
@@ -66,8 +99,6 @@ impl AgentOrchestrator {
             run_id: session_id,
             agent_role: "CollaborativePair".to_owned(),
             qualified: ctx.feedback_history.last().is_some_and(|f| f.passed),
-            output_artifact: None,
-            artifacts: Vec::new(),
             telemetry: tel,
             trajectory: traj,
             total_duration_ms: start_time.elapsed().as_millis(),

@@ -35,12 +35,15 @@ impl AutonomousAgent for ReviewerAgent {
         Box::pin(async move {
             let context = session.context.read().await;
 
-            let prompt = format!(
-                "Goal: {}\n\nDocument to Review: {}\n\nPlease provide a critical evaluation in JSON format with fields: score (0-100), passed (boolean), suggestions (list of strings), critical_errors (list of strings).",
-                context.task_goal, context.current_document
+            let prompt = crate::prompts::ReviewerTemplates::evaluation_task(
+                &context.task_goal,
+                &context.current_document,
             );
 
-            let completion = llm.complete(&prompt).await?;
+            tracing::info!(role = "Reviewer", model = self.llm.model_id(), "Starting evaluation");
+            let completion = llm.complete(&prompt).await.map_err(|e| {
+                RunError::Provider(format!("{} (model: {})", e, self.llm.model_id()))
+            })?;
 
             let payload: EvaluationPayload =
                 parse_json_response(&completion.text).map_err(|e| {

@@ -1,11 +1,9 @@
-use std::time::Duration;
-
 use agent_kernel::{RunError, TokenUsage, LlmCompletion};
 use rig::client::CompletionClient;
 use rig::completion::Prompt;
 use rig::providers::openrouter;
 use tiktoken_rs::cl100k_base;
-use tracing::{info, warn};
+use tracing::info;
 
 #[derive(Debug, Clone)]
 pub struct LlmProviderConfig {
@@ -14,21 +12,6 @@ pub struct LlmProviderConfig {
     pub input_cost_per_1m: f64,
     pub output_cost_per_1m: f64,
 }
-
-const RETRYABLE_ERROR_PATTERNS: &[&str] = &[
-    "429",
-    "rate limit",
-    "rate-limited",
-    "rate limited",
-    "too many requests",
-    "temporarily rate-limited",
-    "timeout",
-    "timed out",
-    "temporarily unavailable",
-    "service unavailable",
-    "connection reset",
-    "deadline exceeded",
-];
 
 pub struct OpenRouterModel {
     client: openrouter::Client,
@@ -53,6 +36,10 @@ pub fn build_openrouter_model(
 }
 
 impl agent_kernel::LanguageModel for OpenRouterModel {
+    fn model_id(&self) -> &str {
+        &self.config.model
+    }
+
     fn agent_builder(&self) -> rig::agent::AgentBuilder<rig::providers::openrouter::completion::CompletionModel> {
         self.client.agent(&self.config.model).preamble(&self.system_prompt)
     }
@@ -61,60 +48,41 @@ impl agent_kernel::LanguageModel for OpenRouterModel {
         let prompt = prompt.to_owned();
         let agent = self.agent_builder().build();
         Box::pin(async move {
-            for attempt in 1..=3 {
-                match agent.prompt(&prompt).await {
-                    Ok(content) => {
-                        let prompt_tokens = estimate_tokens(&prompt);
-                        let completion_tokens = estimate_tokens(&content);
-                        let usage = TokenUsage {
-                            prompt_tokens,
-                            completion_tokens,
-                            total_tokens: prompt_tokens + completion_tokens,
-                        };
+            match agent.prompt(&prompt).await {
+                Ok(content) => {
+                    let prompt_tokens = estimate_tokens(&prompt);
+                    let completion_tokens = estimate_tokens(&content);
+                    let usage = TokenUsage {
+                        prompt_tokens,
+                        completion_tokens,
+                        total_tokens: prompt_tokens + completion_tokens,
+                    };
 
-                        #[allow(clippy::cast_precision_loss)]
-                        let estimated_cost_usd = (prompt_tokens as f64 * (self.config.input_cost_per_1m / 1_000_000.0))
-                            + (completion_tokens as f64 * (self.config.output_cost_per_1m / 1_000_000.0));
+                    #[allow(clippy::cast_precision_loss)]
+                    let estimated_cost_usd = (prompt_tokens as f64 * (self.config.input_cost_per_1m / 1_000_000.0))
+                        + (completion_tokens as f64 * (self.config.output_cost_per_1m / 1_000_000.0));
 
-                        log_telemetry(&self.config, prompt_tokens, completion_tokens);
-                        return Ok(LlmCompletion {
-                            text: content,
-                            usage,
-                            estimated_cost_usd,
-                        });
-                    }
-                    Err(error) => {
-                        let message = error.to_string();
-                        let cleaned_message = if message.contains("\n\n\n") {
-                            message.lines()
-                                .filter(|line| !line.trim().is_empty())
-                                .collect::<Vec<_>>()
-                                .join(" | ")
-                        } else {
-                            message
-                        };
+                    log_telemetry(&self.config, prompt_tokens, completion_tokens);
+                    Ok(LlmCompletion {
+                        text: content,
+                        usage,
+                        estimated_cost_usd,
+                    })
+                }
+                Err(error) => {
+                    let message = error.to_string();
+                    let cleaned_message = if message.contains("\n\n\n") {
+                        message.lines()
+                            .filter(|line| !line.trim().is_empty())
+                            .collect::<Vec<_>>()
+                            .join(" | ")
+                    } else {
+                        message
+                    };
 
-                        if is_retryable_error(&cleaned_message) && attempt < 3 {
-                            let delay = Duration::from_secs(u64::try_from(attempt).unwrap_or(1) * 2);
-                            warn!(
-                                model = %self.config.model,
-                                attempt,
-                                delay_secs = delay.as_secs(),
-                                error = %cleaned_message,
-                                "OpenRouter request failed with a retryable error"
-                            );
-                            tokio::time::sleep(delay).await;
-                            continue;
-                        }
-
-                        return Err(RunError::Provider(cleaned_message));
-                    }
+                    Err(RunError::Provider(cleaned_message))
                 }
             }
-
-            Err(RunError::Provider(
-                "OpenRouter generation exhausted retries".to_owned(),
-            ))
         })
     }
 }
@@ -133,28 +101,8 @@ fn log_telemetry(config: &LlmProviderConfig, prompt_tokens: usize, completion_to
     );
 }
 
-fn is_retryable_error(message: &str) -> bool {
-    let lower = message.to_ascii_lowercase();
-    RETRYABLE_ERROR_PATTERNS
-        .iter()
-        .any(|pattern| lower.contains(pattern))
-}
-
 fn estimate_tokens(text: &str) -> usize {
     cl100k_base().map_or(text.chars().count() / 4, |bpe| {
         bpe.encode_with_special_tokens(text).len()
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::is_retryable_error;
-
-    #[test]
-    fn retryable_error_detection_covers_common_variants() {
-        assert!(is_retryable_error("HTTP 429 Too Many Requests"));
-        assert!(is_retryable_error("Provider is Rate Limited upstream"));
-        assert!(is_retryable_error("request timed out"));
-        assert!(!is_retryable_error("invalid api key"));
-    }
 }

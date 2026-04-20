@@ -17,6 +17,9 @@ pub struct LlmCompletion {
 }
 
 pub trait LanguageModel: Send + Sync {
+    /// Returns the ID of the model.
+    fn model_id(&self) -> &str;
+
     /// Completes the prompt and returns the text, token usage, and cost.
     fn complete(&self, prompt: &str) -> BoxFuture<'_, Result<LlmCompletion, RunError>>;
 

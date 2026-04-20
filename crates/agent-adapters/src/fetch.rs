@@ -1,16 +1,11 @@
-use std::{
-    path::{Path, PathBuf},
-    time::{Duration, SystemTime},
-};
+use std::time::Duration;
 
 use agent_kernel::{
-    RunError, SourceFetcher, SourceKind, SourceMaterial, normalize_whitespace, truncate_chars,
+    RunError, SourceFetcher, SourceKind, SourceMaterial, truncate_chars,
 };
 use reqwest::header::CONTENT_TYPE;
 use scraper::{ElementRef, Html, Selector};
-use sha2::{Digest, Sha256};
-use tokio::{fs, time::timeout};
-use tracing::{info, warn};
+use tokio::time::timeout;
 
 #[derive(Debug, Clone)]
 pub struct WebPageSourceFetcher {
@@ -77,125 +72,11 @@ impl SourceFetcher for WebPageSourceFetcher {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct DiskCacheSourceFetcher<F: SourceFetcher> {
-    inner: F,
-    cache_dir: PathBuf,
-    max_age_days: u64,
-}
-
-impl<F: SourceFetcher> DiskCacheSourceFetcher<F> {
-    pub fn new(inner: F, cache_dir: impl Into<PathBuf>, max_age_days: u64) -> Self {
-        let cache_dir = cache_dir.into();
-        let fetcher = Self {
-            inner,
-            cache_dir: cache_dir.clone(),
-            max_age_days,
-        };
-
-        tokio::spawn(async move {
-            if let Err(error) = prune_stale_cache(&cache_dir, max_age_days).await {
-                warn!(error = %error, "failed to prune stale cache");
-            }
-        });
-
-        fetcher
-    }
-
-    fn cache_path(&self, url: &str) -> PathBuf {
-        let mut hasher = Sha256::new();
-        hasher.update(url.as_bytes());
-        let hash = hex::encode(hasher.finalize());
-        self.cache_dir.join(format!("{hash}.json"))
-    }
-}
-
-impl<F: SourceFetcher> SourceFetcher for DiskCacheSourceFetcher<F> {
-    fn fetch(&self, url: &str) -> agent_kernel::BoxFuture<'_, Result<SourceMaterial, RunError>> {
-        let url = url.to_owned();
-        let path = self.cache_path(&url);
-        let cache_dir = self.cache_dir.clone();
-        let max_age = Duration::from_secs(self.max_age_days * 24 * 3600);
-
-        Box::pin(async move {
-            if path.exists() {
-                let is_valid = is_cache_valid(&path, max_age).await;
-                if is_valid
-                    && let Ok(content) = fs::read_to_string(&path).await
-                    && let Ok(source) = serde_json::from_str::<SourceMaterial>(&content)
-                {
-                    info!(url, path = %path.display(), "cache hit for source fetcher");
-                    return Ok(source);
-                }
-            }
-
-            let source = self.inner.fetch(&url).await?;
-
-            if let Ok(()) = fs::create_dir_all(&cache_dir).await
-                && let Ok(content) = serde_json::to_string(&source)
-                && let Err(error) = fs::write(&path, content).await
-            {
-                warn!(path = %path.display(), error = %error, "failed to write cache file");
-            }
-
-            Ok(source)
-        })
-    }
-}
-
-async fn is_cache_valid(path: &Path, max_age: Duration) -> bool {
-    let Ok(metadata) = fs::metadata(path).await else {
-        return false;
-    };
-    let Ok(modified) = metadata.modified() else {
-        return false;
-    };
-    let Ok(age) = SystemTime::now().duration_since(modified) else {
-        return false;
-    };
-    age < max_age
-}
-
-async fn prune_stale_cache(cache_dir: &Path, max_age_days: u64) -> Result<(), RunError> {
-    if !cache_dir.exists() {
-        return Ok(());
-    }
-
-    let mut dir = fs::read_dir(cache_dir)
-        .await
-        .map_err(|error| RunError::Internal(error.to_string()))?;
-    let max_age = Duration::from_secs(max_age_days * 24 * 3600);
-    let now = SystemTime::now();
-
-    while let Some(entry) = dir
-        .next_entry()
-        .await
-        .map_err(|error| RunError::Internal(error.to_string()))?
-    {
-        let path = entry.path();
-        if path.is_file() && path.extension().and_then(|value| value.to_str()) == Some("json") {
-            let metadata = fs::metadata(&path)
-                .await
-                .map_err(|error| RunError::Internal(error.to_string()))?;
-            let modified = metadata
-                .modified()
-                .map_err(|error| RunError::Internal(error.to_string()))?;
-            if now.duration_since(modified).unwrap_or_default() > max_age {
-                fs::remove_file(path)
-                    .await
-                    .map_err(|error| RunError::Internal(error.to_string()))?;
-            }
-        }
-    }
-
-    Ok(())
-}
-
 fn select_first_text(document: &Html, selector: &str) -> Option<String> {
     Selector::parse(selector).ok().and_then(|selector| {
         document
             .select(&selector)
-            .map(|node| normalize_whitespace(&node.text().collect::<String>()))
+            .map(|node| node.text().collect::<String>().split_whitespace().collect::<Vec<_>>().join(" "))
             .find(|text| !text.is_empty())
     })
 }
@@ -212,7 +93,7 @@ fn extract_body_text(document: &Html) -> Option<String> {
             let total_len = block.text.len();
             let link_len = block.link_text_len;
             #[allow(clippy::cast_precision_loss)]
-            let density = total_len as f32 / (link_len as f32 + 1.0);
+            let density = total_len as f64 / (link_len as f64 + 1.0);
             total_len > 40 && density > 2.0
         })
         .map(|block| block.text)
@@ -221,7 +102,7 @@ fn extract_body_text(document: &Html) -> Option<String> {
     if high_density_blocks.is_empty() {
         let mut raw = String::new();
         collect_raw_text(body, &mut raw);
-        let normalized = normalize_whitespace(&raw);
+        let normalized = raw.split_whitespace().collect::<Vec<_>>().join(" ");
         return if normalized.is_empty() {
             None
         } else {
@@ -229,7 +110,7 @@ fn extract_body_text(document: &Html) -> Option<String> {
         };
     }
 
-    Some(normalize_whitespace(&high_density_blocks.join(" ")))
+    Some(high_density_blocks.join(" ").split_whitespace().collect::<Vec<_>>().join(" "))
 }
 
 struct TextBlock {
@@ -377,44 +258,8 @@ fn is_supported_html_content_type(content_type: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::time::{Duration, SystemTime};
-
-    use agent_kernel::{RunError, SourceFetcher};
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    };
-
-    use filetime::FileTime;
     use scraper::Html;
-    use tokio::fs;
-
-    use super::{
-        DiskCacheSourceFetcher, SourceKind, SourceMaterial, extract_body_text,
-        is_supported_html_content_type,
-    };
-
-    struct MockFetcher(Arc<AtomicUsize>);
-
-    impl SourceFetcher for MockFetcher {
-        fn fetch(
-            &self,
-            url: &str,
-        ) -> agent_kernel::BoxFuture<'_, Result<SourceMaterial, RunError>> {
-            let url = url.to_owned();
-            let count = Arc::clone(&self.0);
-            Box::pin(async move {
-                count.fetch_add(1, Ordering::SeqCst);
-                Ok(SourceMaterial {
-                    kind: SourceKind::UserUrl,
-                    title: Some("Mock".to_owned()),
-                    url,
-                    summary: None,
-                    content: "Fresh Content".to_owned(),
-                })
-            })
-        }
-    }
+    use super::{extract_body_text, is_supported_html_content_type};
 
     #[test]
     fn body_extraction_preserves_word_boundaries_between_blocks() {
@@ -436,41 +281,5 @@ mod tests {
         assert!(is_supported_html_content_type("Text/HTML; charset=UTF-8"));
         assert!(is_supported_html_content_type("APPLICATION/XHTML+XML"));
         assert!(!is_supported_html_content_type("application/json"));
-    }
-
-    #[tokio::test]
-    async fn disk_cache_enforces_expiration() -> Result<(), RunError> {
-        let temp_dir = std::env::temp_dir().join(format!(
-            "agent-cache-test-{}",
-            SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .map_err(|error| RunError::Internal(error.to_string()))?
-                .as_millis()
-        ));
-        let url = "https://example.com/stale";
-        let call_count = Arc::new(AtomicUsize::new(0));
-        let fetcher = DiskCacheSourceFetcher::new(MockFetcher(call_count.clone()), &temp_dir, 1);
-
-        let res1 = fetcher.fetch(url).await?;
-        assert_eq!(res1.content, "Fresh Content");
-        assert_eq!(call_count.load(Ordering::SeqCst), 1);
-
-        let res2 = fetcher.fetch(url).await?;
-        assert_eq!(res2.content, "Fresh Content");
-        assert_eq!(call_count.load(Ordering::SeqCst), 1);
-
-        let cache_path = fetcher.cache_path(url);
-        let stale_time = SystemTime::now() - Duration::from_hours(48);
-        filetime::set_file_mtime(&cache_path, FileTime::from_system_time(stale_time))
-            .map_err(|error| RunError::Internal(error.to_string()))?;
-
-        let res3 = fetcher.fetch(url).await?;
-        assert_eq!(res3.content, "Fresh Content");
-        assert_eq!(call_count.load(Ordering::SeqCst), 2);
-
-        fs::remove_dir_all(temp_dir)
-            .await
-            .map_err(|error| RunError::Internal(error.to_string()))?;
-        Ok(())
     }
 }

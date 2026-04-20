@@ -5,13 +5,11 @@ mod parser;
 mod prompts;
 
 pub use model::{
-    BlockKind, Document, DocumentBlock, DocxAttemptRecord, DocxDraft, DocxEvaluation,
-    DocxExpandRequest, DocxFinalOutput, DocxSourcePolicy,
+    BlockKind, Document, DocumentBlock,
+    DocxExpandRequest, DocxSourcePolicy,
 };
 
 pub use agents::reviewer::ReviewerAgent;
 pub use agents::writer::WriterAgent;
 pub use parser::DocxDocumentParser;
-pub use prompts::{
-    DocxPromptContext, DocxPromptFormatter, DocxPromptTemplates, TokenBudget, count_tokens,
-};
+pub use prompts::count_tokens;

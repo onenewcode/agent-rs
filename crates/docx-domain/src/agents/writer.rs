@@ -52,24 +52,22 @@ impl AutonomousAgent for WriterAgent {
 
             let agent = builder.default_max_turns(10).build();
 
-            // Construct prompt for the writer, including latest feedback if any
+            // Construct prompt for the writer using the new templates
             let latest_feedback = context.feedback_history.last();
             let prompt = if let Some(feedback) = latest_feedback {
-                format!(
-                    "Goal: {}\n\nCurrent Document: {}\n\nFeedback from Reviewer:\n- Score: {}\n- Suggestions: {:?}\n- Errors: {:?}\n\nPlease improve the document based on the feedback.",
-                    context.task_goal,
-                    context.current_document,
-                    feedback.score,
-                    feedback.suggestions,
-                    feedback.critical_errors
+                crate::prompts::WriterTemplates::refinement_task(
+                    &context.task_goal,
+                    &context.current_document,
+                    feedback,
                 )
             } else {
-                format!(
-                    "Goal: {}\n\nCurrent Document: {}\n\nPlease expand and improve this document autonomously using the tools provided.",
-                    context.task_goal, context.current_document
+                crate::prompts::WriterTemplates::initial_task(
+                    &context.task_goal,
+                    &context.current_document,
                 )
             };
 
+            tracing::info!(role = "Writer", model = self.llm.model_id(), "Executing autonomous turn with tools");
             // Release context lock before long-running agent prompt to allow other agents to read if needed
             // (though in this loop it's sequential, it's good practice)
             drop(context);
@@ -77,7 +75,9 @@ impl AutonomousAgent for WriterAgent {
             let _response = agent
                 .prompt(&prompt)
                 .await
-                .map_err(|e| RunError::Provider(e.to_string()))?;
+                .map_err(|e| {
+                    RunError::Provider(format!("{} (model: {})", e, self.llm.model_id()))
+                })?;
 
             // Update document in context
             let updated_content = content_wrapper.read().await.clone();

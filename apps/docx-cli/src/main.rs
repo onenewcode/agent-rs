@@ -98,7 +98,7 @@ async fn run(args: RunArgs) -> anyhow::Result<()> {
 
 fn init_tracing() -> anyhow::Result<()> {
     let filter = EnvFilter::try_from_default_env().or_else(|_| {
-        EnvFilter::try_new("agent_runtime=info,agent_adapters=info,docx_cli=info,rig=info")
+        EnvFilter::try_new("agent_kernel=info,agent_runtime=info,agent_adapters=info,docx_domain=info,docx_cli=info,rig=info")
     })?;
     tracing_subscriber::fmt()
         .with_env_filter(filter)
