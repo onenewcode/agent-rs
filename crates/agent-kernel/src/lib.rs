@@ -1,8 +1,15 @@
 #![allow(clippy::missing_errors_doc)]
 
-use std::{future::Future, path::Path, pin::Pin};
+use std::{
+    collections::BTreeMap,
+    future::Future,
+    path::Path,
+    pin::Pin,
+    sync::Arc,
+};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde_json::Value;
 use thiserror::Error;
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -21,52 +28,45 @@ pub enum RunError {
     Timeout(String),
     #[error("evaluation error: {0}")]
     Evaluation(String),
+    #[error("workflow error: {0}")]
+    Workflow(String),
+    #[error("artifact error: {0}")]
+    Artifact(String),
     #[error("internal error: {0}")]
     Internal(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum BlockKind {
-    Heading { level: u8 },
-    Paragraph,
-    Table,
+pub struct RunOptions {
+    pub global_timeout_secs: u64,
+    pub capture_artifacts: bool,
+}
+
+impl RunOptions {
+    #[must_use]
+    pub fn with_defaults(global_timeout_secs: u64, capture_artifacts: bool) -> Self {
+        Self {
+            global_timeout_secs,
+            capture_artifacts,
+        }
+    }
+}
+
+impl Default for RunOptions {
+    fn default() -> Self {
+        Self {
+            global_timeout_secs: 180,
+            capture_artifacts: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DocumentBlock {
-    pub kind: BlockKind,
-    pub text: String,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Document {
-    pub title: Option<String>,
-    pub blocks: Vec<DocumentBlock>,
-}
-
-impl Document {
-    #[must_use]
-    pub fn render_markdown(&self) -> String {
-        let mut out = String::new();
-
-        for block in &self.blocks {
-            match &block.kind {
-                BlockKind::Heading { level } => {
-                    let heading_level = usize::from(*level).clamp(1, 6);
-                    out.push_str(&"#".repeat(heading_level));
-                    out.push(' ');
-                    out.push_str(&block.text);
-                    out.push_str("\n\n");
-                }
-                BlockKind::Paragraph | BlockKind::Table => {
-                    out.push_str(&block.text);
-                    out.push_str("\n\n");
-                }
-            }
-        }
-
-        out.trim().to_owned()
-    }
+pub struct RunRequest {
+    pub workflow: String,
+    pub input: Value,
+    #[serde(default)]
+    pub options: RunOptions,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -84,84 +84,121 @@ pub struct SourceMaterial {
     pub content: String,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RunConstraints {
-    pub disable_research: bool,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Task {
-    pub prompt: String,
-    pub document: Document,
-    pub user_urls: Vec<String>,
-    pub constraints: RunConstraints,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SearchMode {
-    Disabled,
-    Auto,
-    Required,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Plan {
-    pub objective: String,
-    pub search_mode: SearchMode,
-    pub search_queries: Vec<String>,
-    pub evaluation_focus: String,
-    pub max_refinement_rounds: usize,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ResearchArtifacts {
-    pub queries: Vec<String>,
-    pub sources: Vec<SourceMaterial>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Draft {
-    pub content: String,
-    pub outline: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Evaluation {
+pub struct QualityGate {
     pub score: u8,
+    pub passed: bool,
     pub reason: String,
-    pub qualified: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct StageEvent {
-    pub stage: String,
+pub struct ArtifactEnvelope {
+    pub key: String,
+    pub kind: String,
+    pub value: Value,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ArtifactBag {
+    artifacts: BTreeMap<String, ArtifactEnvelope>,
+}
+
+impl ArtifactBag {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn insert<T: Serialize>(
+        &mut self,
+        key: impl Into<String>,
+        kind: impl Into<String>,
+        value: &T,
+    ) -> Result<(), RunError> {
+        let key = key.into();
+        let kind = kind.into();
+        let serialized = serde_json::to_value(value)
+            .map_err(|error| RunError::Artifact(format!("failed to serialize `{key}`: {error}")))?;
+        self.artifacts.insert(
+            key.clone(),
+            ArtifactEnvelope {
+                key,
+                kind,
+                value: serialized,
+            },
+        );
+        Ok(())
+    }
+
+    pub fn get<T: DeserializeOwned>(&self, key: &str) -> Result<T, RunError> {
+        let artifact = self.artifacts.get(key).ok_or_else(|| {
+            RunError::Artifact(format!("artifact `{key}` is not available in the workflow context"))
+        })?;
+        serde_json::from_value(artifact.value.clone()).map_err(|error| {
+            RunError::Artifact(format!("failed to decode artifact `{key}`: {error}"))
+        })
+    }
+
+    #[must_use]
+    pub fn contains(&self, key: &str) -> bool {
+        self.artifacts.contains_key(key)
+    }
+
+    #[must_use]
+    pub fn values(&self) -> Vec<ArtifactEnvelope> {
+        self.artifacts.values().cloned().collect()
+    }
+
+    #[must_use]
+    pub fn get_envelope(&self, key: &str) -> Option<ArtifactEnvelope> {
+        self.artifacts.get(key).cloned()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EventStatus {
+    Started,
+    Succeeded,
+    Failed,
+    Retrying,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunEvent {
+    pub step_id: String,
     pub attempt: usize,
+    pub status: EventStatus,
     pub duration_ms: u128,
-    pub outcome: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AttemptReport {
-    pub attempt: usize,
-    pub draft: Draft,
-    pub evaluation: Evaluation,
+    pub message: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunReport {
-    pub plan: Plan,
-    pub research: ResearchArtifacts,
-    pub attempts: Vec<AttemptReport>,
-    pub final_output: String,
-    pub final_score: u8,
+    pub run_id: String,
+    pub workflow: String,
     pub qualified: bool,
-    pub final_reason: Option<String>,
-    pub stage_events: Vec<StageEvent>,
+    pub output_artifact: Option<ArtifactEnvelope>,
+    pub artifacts: Vec<ArtifactEnvelope>,
+    pub events: Vec<RunEvent>,
     pub total_duration_ms: u128,
 }
 
-pub trait DocumentParser: Send + Sync {
-    fn parse_path(&self, path: &Path) -> Result<Document, RunError>;
+impl RunReport {
+    pub fn output<T: DeserializeOwned>(&self) -> Result<T, RunError> {
+        let artifact = self.output_artifact.as_ref().ok_or_else(|| {
+            RunError::Artifact("workflow completed without an output artifact".to_owned())
+        })?;
+        serde_json::from_value(artifact.value.clone()).map_err(|error| {
+            RunError::Artifact(format!(
+                "failed to decode output artifact `{}`: {error}",
+                artifact.key
+            ))
+        })
+    }
+}
+
+pub trait DocumentParser<T>: Send + Sync {
+    fn parse_path(&self, path: &Path) -> Result<T, RunError>;
 }
 
 pub trait LanguageModel: Send + Sync {
@@ -180,46 +217,138 @@ pub trait SearchProvider: Send + Sync {
     ) -> BoxFuture<'_, Result<Vec<SourceMaterial>, RunError>>;
 }
 
-pub trait Planner: Send + Sync {
-    fn plan(&self, task: Task) -> BoxFuture<'_, Result<Plan, RunError>>;
+pub trait ArtifactStore: Send + Sync {
+    fn persist(&self, report: &RunReport) -> BoxFuture<'_, Result<(), RunError>>;
 }
 
-pub trait Researcher: Send + Sync {
-    fn research(
-        &self,
-        task: Task,
-        plan: Plan,
-    ) -> BoxFuture<'_, Result<ResearchArtifacts, RunError>>;
+pub trait CapabilityRegistry: Send + Sync {
+    fn llm(&self, name: &str) -> Result<Arc<dyn LanguageModel>, RunError>;
+    fn source_fetcher(&self) -> Result<Arc<dyn SourceFetcher>, RunError>;
+    fn search_provider(&self) -> Option<Arc<dyn SearchProvider>>;
+    fn artifact_store(&self) -> Option<Arc<dyn ArtifactStore>>;
 }
 
-pub trait Generator: Send + Sync {
-    fn generate(
-        &self,
-        task: Task,
-        plan: Plan,
-        research: ResearchArtifacts,
-    ) -> BoxFuture<'_, Result<Draft, RunError>>;
+pub struct WorkflowContext {
+    pub run_id: String,
+    pub workflow: String,
+    pub attempt: usize,
+    pub input: Value,
+    pub artifacts: ArtifactBag,
+    pub services: Arc<dyn CapabilityRegistry>,
 }
 
-pub trait Evaluator: Send + Sync {
-    fn evaluate(
-        &self,
-        task: Task,
-        plan: Plan,
-        research: ResearchArtifacts,
-        draft: Draft,
-    ) -> BoxFuture<'_, Result<Evaluation, RunError>>;
+impl WorkflowContext {
+    #[must_use]
+    pub fn new(
+        run_id: String,
+        workflow: String,
+        input: Value,
+        services: Arc<dyn CapabilityRegistry>,
+    ) -> Self {
+        Self {
+            run_id,
+            workflow,
+            attempt: 0,
+            input,
+            artifacts: ArtifactBag::new(),
+            services,
+        }
+    }
+
+    pub fn input_as<T: DeserializeOwned>(&self) -> Result<T, RunError> {
+        serde_json::from_value(self.input.clone()).map_err(|error| {
+            RunError::Workflow(format!("failed to decode workflow input: {error}"))
+        })
+    }
+
+    pub fn insert_artifact<T: Serialize>(
+        &mut self,
+        key: impl Into<String>,
+        kind: impl Into<String>,
+        value: &T,
+    ) -> Result<(), RunError> {
+        self.artifacts.insert(key, kind, value)
+    }
+
+    pub fn artifact<T: DeserializeOwned>(&self, key: &str) -> Result<T, RunError> {
+        self.artifacts.get(key)
+    }
 }
 
-pub trait Refiner: Send + Sync {
-    fn refine(
+pub enum StepTransition {
+    Continue,
+    JumpTo(&'static str),
+    Complete {
+        output_artifact: Option<&'static str>,
+        qualified: bool,
+    },
+}
+
+pub struct StepExecution {
+    pub context: WorkflowContext,
+    pub transition: StepTransition,
+}
+
+impl StepExecution {
+    #[must_use]
+    pub fn continue_with(context: WorkflowContext) -> Self {
+        Self {
+            context,
+            transition: StepTransition::Continue,
+        }
+    }
+}
+
+pub trait WorkflowStep: Send + Sync {
+    fn id(&self) -> &'static str;
+    fn execute(
         &self,
-        task: Task,
-        plan: Plan,
-        research: ResearchArtifacts,
-        draft: Draft,
-        evaluation: Evaluation,
-    ) -> BoxFuture<'_, Result<Draft, RunError>>;
+        context: WorkflowContext,
+    ) -> BoxFuture<'static, Result<StepExecution, RunError>>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetryPolicy {
+    pub gate_step: &'static str,
+    pub gate_artifact: &'static str,
+    pub retry_from_step: &'static str,
+    pub max_attempts: usize,
+}
+
+pub struct WorkflowDefinition {
+    pub workflow_id: &'static str,
+    pub steps: Vec<Arc<dyn WorkflowStep>>,
+    pub retry_policy: Option<RetryPolicy>,
+    pub default_output_artifact: Option<&'static str>,
+}
+
+impl WorkflowDefinition {
+    #[must_use]
+    pub fn new(workflow_id: &'static str, steps: Vec<Arc<dyn WorkflowStep>>) -> Self {
+        Self {
+            workflow_id,
+            steps,
+            retry_policy: None,
+            default_output_artifact: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_retry_policy(mut self, policy: RetryPolicy) -> Self {
+        self.retry_policy = Some(policy);
+        self
+    }
+
+    #[must_use]
+    pub fn with_default_output_artifact(mut self, key: &'static str) -> Self {
+        self.default_output_artifact = Some(key);
+        self
+    }
+}
+
+pub trait Workflow: Send + Sync {
+    fn id(&self) -> &'static str;
+    fn build(&self, request: &RunRequest) -> Result<WorkflowDefinition, RunError>;
 }
 
 #[must_use]

@@ -1,42 +1,48 @@
 [runtime]
-min_score = 80
-global_timeout_secs = 180
-max_refinement_rounds = 2
+default_timeout_secs = 180
+capture_artifacts = true
 
-[research]
-max_search_results = 5
-fetch_concurrency_limit = 5
-
-[generation]
-document_tokens = 4000
-source_tokens = 2000
-max_total_tokens = 128000
-
-[cache]
-dir = ".agent-cache"
-max_age_days = 7
-
-[observability]
+[services.http]
 user_agent = "agent-rs-docx-agent/0.2"
 fetch_timeout_secs = 20
 search_timeout_secs = 30
 
-[providers.generator]
+[services.cache]
+dir = ".agent-cache"
+max_age_days = 7
+
+[services.artifacts]
+dir = ".agent-cache/runs"
+persist_reports = true
+
+[services.models.writer]
 provider = "openrouter"
 model = "minimax/minimax-m2.5:free"
 api_key = "replace-with-openrouter-api-key"
 
-[providers.evaluator]
+[services.models.reviewer]
 provider = "openrouter"
 model = "qwen/qwen3-coder:free"
 api_key = "replace-with-openrouter-api-key"
 
-[providers.search]
+[services.search]
 provider = "tavily"
 api_key = "replace-with-tavily-api-key"
 
-[docx.prompts]
-# Optional overrides for stage prompts
+[workflows.docx_expand]
+writer_model = "writer"
+reviewer_model = "reviewer"
+planner_model = "writer"
+min_score = 80
+max_refinement_rounds = 2
+search_max_results = 5
+fetch_concurrency_limit = 5
+document_tokens = 4000
+source_tokens = 2000
+max_total_tokens = 128000
+
+[workflows.docx_expand.prompts]
+# Optional overrides for workflow prompts
 # system = "..."
 # planning = "..."
 # outline = "..."

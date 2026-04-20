@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "apps/docx-cli",
+    "crates/agent-app",
     "crates/agent-kernel",
     "crates/agent-runtime",
     "crates/docx-domain",

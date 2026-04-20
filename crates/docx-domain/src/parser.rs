@@ -1,9 +1,9 @@
 use std::{fs::File, io::Read, path::Path};
 
-use agent_kernel::{
-    BlockKind, Document, DocumentBlock, DocumentParser, RunError, normalize_whitespace,
-};
+use agent_kernel::{DocumentParser, RunError, normalize_whitespace};
 use tracing::{debug, info};
+
+use crate::{BlockKind, Document, DocumentBlock};
 
 const WORD_NAMESPACE: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
 
@@ -85,7 +85,7 @@ impl DocxDocumentParser {
     }
 }
 
-impl DocumentParser for DocxDocumentParser {
+impl DocumentParser<Document> for DocxDocumentParser {
     fn parse_path(&self, path: &Path) -> Result<Document, RunError> {
         Self::parse(path)
     }
@@ -191,7 +191,7 @@ fn heading_level(style: &str) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::DocxDocumentParser;
-    use agent_kernel::BlockKind;
+    use crate::BlockKind;
 
     #[test]
     fn parses_headings_and_paragraphs_from_document_xml() -> Result<(), agent_kernel::RunError> {

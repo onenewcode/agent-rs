@@ -14,12 +14,13 @@
 - **Serde**: For serialization and configuration.
 
 ### Architecture
-The workspace is divided into five main components:
-- **`crates/agent-kernel`**: Defines stable runtime contracts (`Planner`, `Researcher`, `Generator`, `Evaluator`, `Refiner`, `SearchProvider`, `SourceFetcher`) and shared data models (`Task`, `Plan`, `Draft`, `Evaluation`, `RunReport`).
-- **`crates/agent-runtime`**: Runs the explicit workflow (`plan -> research -> generate -> evaluate -> refine`) and records stage-level telemetry.
-- **`crates/docx-domain`**: Owns DOCX parsing, token budgeting, and prompt rendering for DOCX-centered tasks.
-- **`crates/agent-adapters`**: Implements OpenRouter, Tavily, webpage fetching, caching, and DOCX-specific stage components.
-- **`apps/docx-cli`**: A thin command-line composition root for loading config, wiring adapters, and executing the runtime.
+The workspace is divided into six main components:
+- **`crates/agent-kernel`**: Defines generic workflow contracts, run artifacts, quality gates, service capabilities, and shared error/report types.
+- **`crates/agent-runtime`**: Executes registered workflows as step pipelines with structured events and retry/refinement policies.
+- **`crates/docx-domain`**: Owns DOCX parsing, token budgeting, prompt rendering, and the `docx.expand` workflow implementation.
+- **`crates/agent-adapters`**: Implements infrastructure adapters for OpenRouter, Tavily, web fetching, cache-backed fetching, and JSON artifact persistence.
+- **`crates/agent-app`**: Loads canonical TOML config, wires providers/services/workflows, and exposes application-level entrypoints.
+- **`apps/docx-cli`**: A thin command-line adapter that resolves config and dispatches workflow requests.
 
 ---
 
@@ -34,7 +35,7 @@ The workspace is divided into five main components:
 - **Test**: `cargo test --workspace`
 - **Run (CLI)**:
   ```bash
-  cargo run -p docx-cli -- expand --doc <PATH_TO_DOCX> --prompt "<EXPANSION_PROMPT>" --url <URL1> --url <URL2>
+  cargo run -p docx-cli -- run --doc <PATH_TO_DOCX> --prompt "<EXPANSION_PROMPT>" --url <URL1> --url <URL2>
   ```
 - **Linting**:
   ```bash
@@ -48,9 +49,9 @@ The workspace is divided into five main components:
 
 ### Configuration
 The project uses a TOML configuration file. An example is provided in `agent.example.toml`. Copy it to `agent.toml` and add your API keys:
-- `providers.generator.api_key`: OpenRouter API key for planning/generation/refinement.
-- `providers.evaluator.api_key`: OpenRouter API key for evaluation.
-- `providers.search.api_key`: Tavily API key (optional).
+- `services.models.<alias>.api_key`: OpenRouter API key for named model capabilities.
+- `services.search.api_key`: Tavily API key (optional).
+- `workflows.docx_expand.*`: DOCX workflow-specific runtime, prompt, and retrieval settings.
 
 ---
 
@@ -64,9 +65,9 @@ The project uses a TOML configuration file. An example is provided in `agent.exa
 
 ### Testing Practices
 - **Unit Tests**: Located within each module.
-- **Runtime Tests**: Workflow loop coverage is in `agent-runtime`.
+- **Runtime Tests**: Workflow executor and retry-policy coverage is in `agent-runtime`.
 - **Documentation**: Keep `docs/` and generated documentation in sync using `.harness/sync.py`.
 
 ### Edit Guardrails
 - **Generated Files**: Never hand-edit files in `target/generated-preview/` or other generated documentation. Rerun `uv run .harness/sync.py`.
-- **Crate Boundaries**: Keep `agent-kernel` dependency-light and stable; keep provider and IO details in `agent-adapters`.
+- **Crate Boundaries**: Keep `agent-kernel` dependency-light and generic; keep provider and IO details in `agent-adapters`; keep workflow behavior in domain crates.

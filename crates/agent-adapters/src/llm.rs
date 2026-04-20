@@ -4,7 +4,13 @@ use agent_kernel::RunError;
 use rig::{client::CompletionClient, completion::Prompt, providers::openrouter};
 use tracing::{info, warn};
 
-use crate::LlmProviderConfig;
+#[derive(Debug, Clone)]
+pub struct LlmProviderConfig {
+    pub model: String,
+    pub api_key: String,
+    pub input_cost_per_1m: f64,
+    pub output_cost_per_1m: f64,
+}
 
 const RETRYABLE_ERROR_PATTERNS: &[&str] = &[
     "429",
@@ -82,17 +88,17 @@ impl<P: Prompt + Send + Sync> agent_kernel::LanguageModel for OpenRouterModel<P>
 }
 
 fn log_telemetry(config: &LlmProviderConfig, input: &str, output: &str) {
-    let input_tokens = docx_domain::count_tokens(input);
-    let output_tokens = docx_domain::count_tokens(output);
+    let input_units = input.chars().count();
+    let output_units = output.chars().count();
 
     #[allow(clippy::cast_precision_loss)]
-    let total_cost = (input_tokens as f64 * (config.input_cost_per_1m / 1_000_000.0))
-        + (output_tokens as f64 * (config.output_cost_per_1m / 1_000_000.0));
+    let total_cost = (input_units as f64 * (config.input_cost_per_1m / 1_000_000.0))
+        + (output_units as f64 * (config.output_cost_per_1m / 1_000_000.0));
 
     info!(
         model = %config.model,
-        input_tokens,
-        output_tokens,
+        input_units,
+        output_units,
         cost_usd = %format!("{total_cost:.6}"),
         "LLM request completed"
     );

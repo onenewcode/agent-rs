@@ -1,7 +1,9 @@
 use std::sync::OnceLock;
 
-use agent_kernel::{Plan, ResearchArtifacts, Task, truncate_chars};
+use agent_kernel::truncate_chars;
 use tiktoken_rs::{CoreBPE, cl100k_base};
+
+use crate::{DocxExpandRequest, DocxPlan, DocxResearchArtifacts, Document};
 
 static TOKENIZER: OnceLock<CoreBPE> = OnceLock::new();
 
@@ -165,9 +167,10 @@ impl Default for DocxPromptTemplates {
 
 #[derive(Debug, Clone)]
 pub struct DocxPromptContext {
-    pub task: Task,
-    pub plan: Plan,
-    pub research: ResearchArtifacts,
+    pub request: DocxExpandRequest,
+    pub document: Document,
+    pub plan: DocxPlan,
+    pub research: DocxResearchArtifacts,
 }
 
 #[derive(Debug, Clone)]
@@ -188,16 +191,13 @@ impl DocxPromptFormatter {
     }
 
     #[must_use]
-    pub fn planning_prompt(&self, task: &Task) -> String {
-        let user_urls = render_user_urls(&task.user_urls);
-        let document = truncate_tokens(
-            &task.document.render_markdown(),
-            self.budget.document_tokens,
-        );
+    pub fn planning_prompt(&self, request: &DocxExpandRequest, document: &Document) -> String {
+        let user_urls = render_user_urls(&request.user_urls);
+        let document = truncate_tokens(&document.render_markdown(), self.budget.document_tokens);
 
         self.templates
             .planning
-            .replace("{prompt}", &task.prompt)
+            .replace("{prompt}", &request.prompt)
             .replace("{document}", &document)
             .replace("{user_urls}", &user_urls)
     }
@@ -205,18 +205,18 @@ impl DocxPromptFormatter {
     #[must_use]
     pub fn outline_prompt(&self, context: &DocxPromptContext) -> String {
         let document = truncate_tokens(
-            &context.task.document.render_markdown(),
+            &context.document.render_markdown(),
             self.document_limit(None, context.research.sources.len()),
         );
         let sources = render_sources(
             &context.research,
             self.source_limit(None, context.research.sources.len()),
         );
-        let user_urls = render_user_urls(&context.task.user_urls);
+        let user_urls = render_user_urls(&context.request.user_urls);
 
         self.templates
             .outline
-            .replace("{prompt}", &context.task.prompt)
+            .replace("{prompt}", &context.request.prompt)
             .replace("{objective}", &context.plan.objective)
             .replace("{document}", &document)
             .replace("{user_urls}", &user_urls)
@@ -226,18 +226,18 @@ impl DocxPromptFormatter {
     #[must_use]
     pub fn generation_prompt(&self, context: &DocxPromptContext, outline: &str) -> String {
         let document = truncate_tokens(
-            &context.task.document.render_markdown(),
+            &context.document.render_markdown(),
             self.document_limit(Some(outline), context.research.sources.len()),
         );
         let sources = render_sources(
             &context.research,
             self.source_limit(Some(outline), context.research.sources.len()),
         );
-        let user_urls = render_user_urls(&context.task.user_urls);
+        let user_urls = render_user_urls(&context.request.user_urls);
 
         self.templates
             .generation
-            .replace("{prompt}", &context.task.prompt)
+            .replace("{prompt}", &context.request.prompt)
             .replace("{objective}", &context.plan.objective)
             .replace("{document}", &document)
             .replace("{user_urls}", &user_urls)
@@ -255,7 +255,7 @@ impl DocxPromptFormatter {
 
         self.templates
             .evaluation
-            .replace("{prompt}", &prompt_context.task.prompt)
+            .replace("{prompt}", &prompt_context.request.prompt)
             .replace("{objective}", &prompt_context.plan.objective)
             .replace("{evaluation_focus}", &prompt_context.plan.evaluation_focus)
             .replace("{content}", draft_content)
@@ -273,7 +273,7 @@ impl DocxPromptFormatter {
 
         self.templates
             .refinement
-            .replace("{prompt}", &prompt_context.task.prompt)
+            .replace("{prompt}", &prompt_context.request.prompt)
             .replace("{objective}", &prompt_context.plan.objective)
             .replace("{content}", draft_content)
             .replace("{reason}", reason)
@@ -314,7 +314,7 @@ fn render_user_urls(user_urls: &[String]) -> String {
     }
 }
 
-fn render_sources(research: &ResearchArtifacts, per_source_limit: usize) -> String {
+fn render_sources(research: &DocxResearchArtifacts, per_source_limit: usize) -> String {
     if research.sources.is_empty() {
         return "无".to_owned();
     }
@@ -340,7 +340,8 @@ fn render_sources(research: &ResearchArtifacts, per_source_limit: usize) -> Stri
 #[cfg(test)]
 mod tests {
     use super::{DocxPromptFormatter, DocxPromptTemplates, TokenBudget};
-    use agent_kernel::{Document, Plan, ResearchArtifacts, SearchMode, Task};
+    use crate::{DocxExpandRequest, DocxPlan, DocxResearchArtifacts, Document};
+    use crate::model::{DocxSourcePolicy, SearchMode};
 
     #[test]
     fn formatter_preserves_small_budget_split() {
@@ -351,20 +352,21 @@ mod tests {
 
         let prompt = formatter.generation_prompt(
             &super::DocxPromptContext {
-                task: Task {
+                request: DocxExpandRequest {
+                    document_path: "example.docx".to_owned(),
                     prompt: "扩写".to_owned(),
-                    document: Document::default(),
                     user_urls: Vec::new(),
-                    constraints: agent_kernel::RunConstraints::default(),
+                    source_policy: DocxSourcePolicy::default(),
                 },
-                plan: Plan {
+                document: Document::default(),
+                plan: DocxPlan {
                     objective: "扩写文档".to_owned(),
                     search_mode: SearchMode::Auto,
                     search_queries: Vec::new(),
                     evaluation_focus: "真实性".to_owned(),
                     max_refinement_rounds: 2,
                 },
-                research: ResearchArtifacts::default(),
+                research: DocxResearchArtifacts::default(),
             },
             "大纲",
         );

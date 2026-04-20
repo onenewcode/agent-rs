@@ -13,7 +13,6 @@ name = "agent-adapters"
 version = "0.1.0"
 dependencies = [
  "agent-kernel",
- "docx-domain",
  "filetime",
  "hex",
  "reqwest",
@@ -23,8 +22,21 @@ dependencies = [
  "serde_json",
  "sha2",
  "tokio",
- "toml",
  "tracing",
+]
+
+[[package]]
+name = "agent-app"
+version = "0.1.0"
+dependencies = [
+ "agent-adapters",
+ "agent-kernel",
+ "agent-runtime",
+ "docx-domain",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "toml",
 ]
 
 [[package]]
@@ -32,6 +44,7 @@ name = "agent-kernel"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "serde_json",
  "thiserror 1.0.69",
 ]
 
@@ -40,6 +53,7 @@ name = "agent-runtime"
 version = "0.1.0"
 dependencies = [
  "agent-kernel",
+ "serde_json",
  "tokio",
  "tracing",
 ]
@@ -450,9 +464,7 @@ dependencies = [
 name = "docx-cli"
 version = "0.1.0"
 dependencies = [
- "agent-adapters",
- "agent-kernel",
- "agent-runtime",
+ "agent-app",
  "anyhow",
  "clap",
  "docx-domain",
@@ -468,7 +480,10 @@ version = "0.1.0"
 dependencies = [
  "agent-kernel",
  "roxmltree",
+ "serde",
+ "serde_json",
  "tiktoken-rs",
+ "tokio",
  "tracing",
  "zip",
 ]
