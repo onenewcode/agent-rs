@@ -1,8 +1,8 @@
 use std::{collections::HashSet, path::PathBuf, sync::Arc};
 
 use agent_kernel::{
-    BoxFuture, DocumentParser, QualityGate, RetryPolicy, RunError, RunRequest, SearchProvider,
-    SourceFetcher, SourceMaterial, StepExecution, StepTransition, Workflow, WorkflowContext,
+    BoxFuture, DocumentParser, QualityGate, RunError, RunRequest, SearchProvider,
+    SourceFetcher, SourceMaterial, StepExecution, Workflow, WorkflowContext,
     WorkflowDefinition, WorkflowStep,
 };
 use serde::Deserialize;
@@ -75,6 +75,7 @@ impl Workflow for DocxWorkflow {
 
         Ok(WorkflowDefinition::new(
             self.id(),
+            "parse_document",
             vec![
                 Arc::new(ParseDocumentStep {
                     parser: self.parser,
@@ -98,6 +99,7 @@ impl Workflow for DocxWorkflow {
                     reviewer_model: self.config.reviewer_model.clone(),
                     formatter: formatter.clone(),
                     min_score: self.config.min_score,
+                    max_attempts: self.config.max_refinement_rounds,
                 }),
                 Arc::new(FinalizeStep),
                 Arc::new(RefineStep {
@@ -105,14 +107,7 @@ impl Workflow for DocxWorkflow {
                     formatter,
                 }),
             ],
-        )
-        .with_retry_policy(RetryPolicy {
-            gate_step: "evaluate",
-            gate_artifact: QUALITY_GATE_ARTIFACT,
-            retry_from_step: "refine",
-            max_attempts: self.config.max_refinement_rounds,
-        })
-        .with_default_output_artifact(FINAL_OUTPUT_ARTIFACT))
+        ))
     }
 }
 
@@ -131,8 +126,9 @@ impl WorkflowStep for ParseDocumentStep {
         Box::pin(async move {
             let request: DocxExpandRequest = context.input_as()?;
             let document = parser.parse_path(&PathBuf::from(request.document_path))?;
-            context.insert_artifact(DOCUMENT_ARTIFACT, "docx.document", &document)?;
-            Ok(StepExecution::continue_with(context))
+            context.emit_artifact(DOCUMENT_ARTIFACT, "docx.document", &document)?;
+            context.insert_state(document);
+            Ok(StepExecution::next(context, "plan"))
         })
     }
 }
@@ -160,7 +156,7 @@ impl WorkflowStep for PlanStep {
 
         Box::pin(async move {
             let request: DocxExpandRequest = context.input_as()?;
-            let document: Document = context.artifact(DOCUMENT_ARTIFACT)?;
+            let document: Document = context.state::<Document>()?.clone();
             let llm = planner_model
                 .as_deref()
                 .map(|name| context.services.llm(name))
@@ -202,8 +198,9 @@ impl WorkflowStep for PlanStep {
                 )
             };
 
-            context.insert_artifact(PLAN_ARTIFACT, "docx.plan", &plan)?;
-            Ok(StepExecution::continue_with(context))
+            context.emit_artifact(PLAN_ARTIFACT, "docx.plan", &plan)?;
+            context.insert_state(plan);
+            Ok(StepExecution::next(context, "research"))
         })
     }
 }
@@ -310,7 +307,7 @@ impl WorkflowStep for ResearchStep {
         let fetch_concurrency_limit = self.fetch_concurrency_limit;
         Box::pin(async move {
             let request: DocxExpandRequest = context.input_as()?;
-            let plan: DocxPlan = context.artifact(PLAN_ARTIFACT)?;
+            let plan: DocxPlan = context.state::<DocxPlan>()?.clone();
             let fetcher = context.services.source_fetcher()?;
             let search_provider = context.services.search_provider();
 
@@ -326,8 +323,9 @@ impl WorkflowStep for ResearchStep {
             queries.dedup();
 
             let research = DocxResearchArtifacts { queries, sources };
-            context.insert_artifact(RESEARCH_ARTIFACT, "docx.research", &research)?;
-            Ok(StepExecution::continue_with(context))
+            context.emit_artifact(RESEARCH_ARTIFACT, "docx.research", &research)?;
+            context.insert_state(research);
+            Ok(StepExecution::next(context, "generate"))
         })
     }
 }
@@ -430,9 +428,9 @@ impl WorkflowStep for GenerateStep {
         let formatter = self.formatter.clone();
         Box::pin(async move {
             let request: DocxExpandRequest = context.input_as()?;
-            let document: Document = context.artifact(DOCUMENT_ARTIFACT)?;
-            let plan: DocxPlan = context.artifact(PLAN_ARTIFACT)?;
-            let research: DocxResearchArtifacts = context.artifact(RESEARCH_ARTIFACT)?;
+            let document: Document = context.state::<Document>()?.clone();
+            let plan: DocxPlan = context.state::<DocxPlan>()?.clone();
+            let research: DocxResearchArtifacts = context.state::<DocxResearchArtifacts>()?.clone();
             let llm = context.services.llm(&writer_model)?;
             let prompt_context = DocxPromptContext {
                 request,
@@ -446,15 +444,13 @@ impl WorkflowStep for GenerateStep {
             let markdown = llm
                 .complete(&formatter.generation_prompt(&prompt_context, &outline))
                 .await?;
-            context.insert_artifact(
-                DRAFT_ARTIFACT,
-                "docx.draft",
-                &DocxDraft {
-                    content: markdown,
-                    outline: Some(outline),
-                },
-            )?;
-            Ok(StepExecution::continue_with(context))
+            let draft = DocxDraft {
+                content: markdown,
+                outline: Some(outline),
+            };
+            context.emit_artifact(DRAFT_ARTIFACT, "docx.draft", &draft)?;
+            context.insert_state(draft);
+            Ok(StepExecution::next(context, "evaluate"))
         })
     }
 }
@@ -464,7 +460,10 @@ struct EvaluateStep {
     reviewer_model: String,
     formatter: DocxPromptFormatter,
     min_score: u8,
+    max_attempts: usize,
 }
+
+struct RefinementCounter(usize);
 
 impl WorkflowStep for EvaluateStep {
     fn id(&self) -> &'static str {
@@ -475,12 +474,14 @@ impl WorkflowStep for EvaluateStep {
         let reviewer_model = self.reviewer_model.clone();
         let formatter = self.formatter.clone();
         let min_score = self.min_score;
+        let max_attempts = self.max_attempts;
+
         Box::pin(async move {
             let request: DocxExpandRequest = context.input_as()?;
-            let document: Document = context.artifact(DOCUMENT_ARTIFACT)?;
-            let plan: DocxPlan = context.artifact(PLAN_ARTIFACT)?;
-            let research: DocxResearchArtifacts = context.artifact(RESEARCH_ARTIFACT)?;
-            let draft: DocxDraft = context.artifact(DRAFT_ARTIFACT)?;
+            let document: Document = context.state::<Document>()?.clone();
+            let plan: DocxPlan = context.state::<DocxPlan>()?.clone();
+            let research: DocxResearchArtifacts = context.state::<DocxResearchArtifacts>()?.clone();
+            let draft: DocxDraft = context.state::<DocxDraft>()?.clone();
             let llm = context.services.llm(&reviewer_model)?;
             let prompt_context = DocxPromptContext {
                 request,
@@ -495,24 +496,31 @@ impl WorkflowStep for EvaluateStep {
             evaluation.qualified = evaluation.score >= min_score;
             let gate: QualityGate = evaluation.clone().into();
 
-            context.insert_artifact(EVALUATION_ARTIFACT, "docx.evaluation", &evaluation)?;
-            context.insert_artifact(QUALITY_GATE_ARTIFACT, "quality_gate", &gate)?;
+            context.emit_artifact(EVALUATION_ARTIFACT, "docx.evaluation", &evaluation)?;
+            context.emit_artifact(QUALITY_GATE_ARTIFACT, "quality_gate", &gate)?;
+            context.insert_state(evaluation.clone());
 
             let mut attempts = context
-                .artifacts
-                .get::<Vec<DocxAttemptRecord>>(ATTEMPTS_ARTIFACT)
+                .state::<Vec<DocxAttemptRecord>>()
+                .cloned()
                 .unwrap_or_default();
-            attempts.push(DocxAttemptRecord {
-                attempt: context.attempt,
-                draft,
-                evaluation,
-            });
-            context.insert_artifact(ATTEMPTS_ARTIFACT, "docx.attempts", &attempts)?;
+            
+            let current_attempt = context.state::<RefinementCounter>().map_or(0, |c| c.0);
 
-            Ok(StepExecution {
-                context,
-                transition: StepTransition::JumpTo("finalize"),
-            })
+            attempts.push(DocxAttemptRecord {
+                attempt: current_attempt,
+                draft,
+                evaluation: evaluation.clone(),
+            });
+            context.insert_state(attempts.clone());
+            context.emit_artifact(ATTEMPTS_ARTIFACT, "docx.attempts", &attempts)?;
+
+            if evaluation.qualified || current_attempt >= max_attempts {
+                Ok(StepExecution::next(context, "finalize"))
+            } else {
+                context.insert_state(RefinementCounter(current_attempt + 1));
+                Ok(StepExecution::next(context, "refine"))
+            }
         })
     }
 }
@@ -548,22 +556,17 @@ impl WorkflowStep for FinalizeStep {
 
     fn execute(&self, mut context: WorkflowContext) -> BoxFuture<'static, Result<StepExecution, RunError>> {
         Box::pin(async move {
-            let draft: DocxDraft = context.artifact(DRAFT_ARTIFACT)?;
-            let evaluation: DocxEvaluation = context.artifact(EVALUATION_ARTIFACT)?;
+            let draft: DocxDraft = context.state::<DocxDraft>()?.clone();
+            let evaluation: DocxEvaluation = context.state::<DocxEvaluation>()?.clone();
             let output = DocxFinalOutput {
                 markdown: draft.content,
                 score: evaluation.score,
                 qualified: evaluation.qualified,
                 reason: evaluation.reason,
             };
-            context.insert_artifact(FINAL_OUTPUT_ARTIFACT, "docx.final_output", &output)?;
-            Ok(StepExecution {
-                context,
-                transition: StepTransition::Complete {
-                    output_artifact: Some(FINAL_OUTPUT_ARTIFACT),
-                    qualified: output.qualified,
-                },
-            })
+            context.emit_artifact(FINAL_OUTPUT_ARTIFACT, "docx.final_output", &output)?;
+            let output_artifact = context.artifacts.last().cloned();
+            Ok(StepExecution::complete(context, output_artifact, output.qualified))
         })
     }
 }
@@ -584,11 +587,11 @@ impl WorkflowStep for RefineStep {
         let formatter = self.formatter.clone();
         Box::pin(async move {
             let request: DocxExpandRequest = context.input_as()?;
-            let document: Document = context.artifact(DOCUMENT_ARTIFACT)?;
-            let plan: DocxPlan = context.artifact(PLAN_ARTIFACT)?;
-            let research: DocxResearchArtifacts = context.artifact(RESEARCH_ARTIFACT)?;
-            let draft: DocxDraft = context.artifact(DRAFT_ARTIFACT)?;
-            let evaluation: DocxEvaluation = context.artifact(EVALUATION_ARTIFACT)?;
+            let document: Document = context.state::<Document>()?.clone();
+            let plan: DocxPlan = context.state::<DocxPlan>()?.clone();
+            let research: DocxResearchArtifacts = context.state::<DocxResearchArtifacts>()?.clone();
+            let draft: DocxDraft = context.state::<DocxDraft>()?.clone();
+            let evaluation: DocxEvaluation = context.state::<DocxEvaluation>()?.clone();
             let llm = context.services.llm(&writer_model)?;
             let prompt_context = DocxPromptContext {
                 request,
@@ -603,18 +606,13 @@ impl WorkflowStep for RefineStep {
                     &evaluation.reason,
                 ))
                 .await?;
-            context.insert_artifact(
-                DRAFT_ARTIFACT,
-                "docx.draft",
-                &DocxDraft {
-                    content: refined,
-                    outline: draft.outline,
-                },
-            )?;
-            Ok(StepExecution {
-                context,
-                transition: StepTransition::JumpTo("evaluate"),
-            })
+            let refined_draft = DocxDraft {
+                content: refined,
+                outline: draft.outline,
+            };
+            context.emit_artifact(DRAFT_ARTIFACT, "docx.draft", &refined_draft)?;
+            context.insert_state(refined_draft);
+            Ok(StepExecution::next(context, "evaluate"))
         })
     }
 }

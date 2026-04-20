@@ -7,8 +7,8 @@ use std::{
 };
 
 use agent_kernel::{
-    ArtifactEnvelope, CapabilityRegistry, EventStatus, QualityGate, RunError, RunEvent, RunReport,
-    RunRequest, StepTransition, Workflow, WorkflowContext, WorkflowDefinition,
+    CapabilityRegistry, EventStatus, RunError, RunEvent, RunReport, RunRequest, StepTransition,
+    Workflow, WorkflowContext, WorkflowDefinition,
 };
 use tokio::time::timeout;
 
@@ -122,25 +122,21 @@ async fn execute_workflow(
         services.clone(),
     );
     let mut events = Vec::new();
-    let step_index = definition
-        .steps
-        .iter()
-        .enumerate()
-        .map(|(index, step)| (step.id(), index))
-        .collect::<BTreeMap<_, _>>();
-    let mut current_index = 0usize;
-    let mut output_artifact = None::<ArtifactEnvelope>;
-    let mut qualified = false;
-    let mut retry_attempts = 0usize;
+    let mut current_step_id = definition.initial_step;
+    let output_artifact;
+    let qualified;
     let capture_artifacts = capture_artifacts && request.options.capture_artifacts;
 
-    while current_index < definition.steps.len() {
-        let step = &definition.steps[current_index];
-        let step_id = step.id();
-        let attempt = context.attempt;
+    loop {
+        let step = definition.steps.get(current_step_id).ok_or_else(|| {
+            RunError::Workflow(format!(
+                "workflow `{}` tried to execute undefined step `{current_step_id}`",
+                definition.workflow_id
+            ))
+        })?;
+
         events.push(RunEvent {
-            step_id: step_id.to_owned(),
-            attempt,
+            step_id: current_step_id.to_owned(),
             status: EventStatus::Started,
             duration_ms: 0,
             message: None,
@@ -154,65 +150,29 @@ async fn execute_workflow(
                 let duration_ms = step_started.elapsed().as_millis();
                 context = execution.context;
                 events.push(RunEvent {
-                    step_id: step_id.to_owned(),
-                    attempt,
+                    step_id: current_step_id.to_owned(),
                     status: EventStatus::Succeeded,
                     duration_ms,
                     message: None,
                 });
 
-                if let Some(policy) = &definition.retry_policy
-                    && step_id == policy.gate_step
-                {
-                    let gate = context.artifact::<QualityGate>(policy.gate_artifact)?;
-                    if !gate.passed && retry_attempts < policy.max_attempts {
-                        retry_attempts += 1;
-                        context.attempt = retry_attempts;
-                        events.push(RunEvent {
-                            step_id: step_id.to_owned(),
-                            attempt: context.attempt,
-                            status: EventStatus::Retrying,
-                            duration_ms: 0,
-                            message: Some(gate.reason),
-                        });
-                        current_index = *step_index.get(policy.retry_from_step).ok_or_else(|| {
-                            RunError::Workflow(format!(
-                                "retry step `{}` is not defined in workflow `{}`",
-                                policy.retry_from_step, definition.workflow_id
-                            ))
-                        })?;
-                        continue;
-                    }
-                }
-
                 match execution.transition {
-                    StepTransition::Continue => {
-                        current_index += 1;
-                    }
-                    StepTransition::JumpTo(step_id) => {
-                        current_index = *step_index.get(step_id).ok_or_else(|| {
-                            RunError::Workflow(format!(
-                                "workflow `{}` tried to jump to undefined step `{step_id}`",
-                                definition.workflow_id
-                            ))
-                        })?;
+                    StepTransition::Next(next_step) => {
+                        current_step_id = next_step;
                     }
                     StepTransition::Complete {
                         output_artifact: requested_output,
                         qualified: completed_qualified,
                     } => {
                         qualified = completed_qualified;
-                        output_artifact = requested_output
-                            .or(definition.default_output_artifact)
-                            .and_then(|key| context.artifacts.get_envelope(key));
+                        output_artifact = requested_output;
                         break;
                     }
                 }
             }
             Err(error) => {
                 events.push(RunEvent {
-                    step_id: step_id.to_owned(),
-                    attempt,
+                    step_id: current_step_id.to_owned(),
                     status: EventStatus::Failed,
                     duration_ms: step_started.elapsed().as_millis(),
                     message: Some(error.to_string()),
@@ -228,7 +188,7 @@ async fn execute_workflow(
         qualified,
         output_artifact,
         artifacts: if capture_artifacts {
-            context.artifacts.values()
+            context.artifacts
         } else {
             Vec::new()
         },
@@ -261,7 +221,7 @@ mod tests {
     use agent_kernel::{
         ArtifactStore, CapabilityRegistry, DocumentParser, LanguageModel, QualityGate,
         RunOptions, SearchProvider, SourceFetcher, StepExecution, Workflow, WorkflowDefinition,
-        WorkflowStep,
+        WorkflowStep, ArtifactEnvelope,
     };
 
     use super::{ExecutorSettings, WorkflowExecutor};
@@ -301,22 +261,18 @@ mod tests {
         ) -> Result<WorkflowDefinition, agent_kernel::RunError> {
             Ok(WorkflowDefinition::new(
                 self.id(),
+                "generate",
                 vec![
                     Arc::new(GenerateStep),
                     Arc::new(EvaluateStep),
                     Arc::new(FinalizeStep),
                     Arc::new(RefineStep),
                 ],
-            )
-            .with_retry_policy(agent_kernel::RetryPolicy {
-                gate_step: "evaluate",
-                gate_artifact: "quality_gate",
-                retry_from_step: "refine",
-                max_attempts: 2,
-            })
-            .with_default_output_artifact("result"))
+            ))
         }
     }
+
+    struct AttemptCount(usize);
 
     struct GenerateStep;
 
@@ -330,8 +286,9 @@ mod tests {
             mut context: agent_kernel::WorkflowContext,
         ) -> agent_kernel::BoxFuture<'static, Result<StepExecution, agent_kernel::RunError>> {
             Box::pin(async move {
-                context.insert_artifact("draft", "text", &format!("draft-{}", context.attempt))?;
-                Ok(StepExecution::continue_with(context))
+                context.insert_state(AttemptCount(0));
+                context.insert_state("draft-0".to_string());
+                Ok(StepExecution::next(context, "evaluate"))
             })
         }
     }
@@ -348,11 +305,12 @@ mod tests {
             mut context: agent_kernel::WorkflowContext,
         ) -> agent_kernel::BoxFuture<'static, Result<StepExecution, agent_kernel::RunError>> {
             Box::pin(async move {
-                let passed = context.attempt > 0;
-                context.insert_artifact(
-                    "quality_gate",
-                    "quality_gate",
-                    &QualityGate {
+                let passed = {
+                    let attempt = context.state::<AttemptCount>()?.0;
+                    attempt > 0
+                };
+                context.insert_state(
+                    QualityGate {
                         score: if passed { 90 } else { 40 },
                         passed,
                         reason: if passed {
@@ -360,12 +318,20 @@ mod tests {
                         } else {
                             "needs work".to_owned()
                         },
-                    },
-                )?;
-                Ok(agent_kernel::StepExecution {
-                    context,
-                    transition: agent_kernel::StepTransition::JumpTo("finalize"),
-                })
+                    }
+                );
+                
+                if passed {
+                    Ok(agent_kernel::StepExecution::next(context, "finalize"))
+                } else {
+                    let attempt = context.state_mut::<AttemptCount>()?;
+                    if attempt.0 < 2 {
+                        attempt.0 += 1;
+                        Ok(agent_kernel::StepExecution::next(context, "refine"))
+                    } else {
+                        Ok(agent_kernel::StepExecution::next(context, "finalize"))
+                    }
+                }
             })
         }
     }
@@ -382,12 +348,9 @@ mod tests {
             mut context: agent_kernel::WorkflowContext,
         ) -> agent_kernel::BoxFuture<'static, Result<StepExecution, agent_kernel::RunError>> {
             Box::pin(async move {
-                let draft: String = context.artifact("draft")?;
-                context.insert_artifact("draft", "text", &format!("{draft}-refined"))?;
-                Ok(agent_kernel::StepExecution {
-                    context,
-                    transition: agent_kernel::StepTransition::JumpTo("evaluate"),
-                })
+                let draft = context.state_mut::<String>()?;
+                *draft = format!("{draft}-refined");
+                Ok(agent_kernel::StepExecution::next(context, "evaluate"))
             })
         }
     }
@@ -401,19 +364,19 @@ mod tests {
 
         fn execute(
             &self,
-            mut context: agent_kernel::WorkflowContext,
+            context: agent_kernel::WorkflowContext,
         ) -> agent_kernel::BoxFuture<'static, Result<StepExecution, agent_kernel::RunError>> {
             Box::pin(async move {
-                let draft: String = context.artifact("draft")?;
-                let gate: QualityGate = context.artifact("quality_gate")?;
-                context.insert_artifact("result", "text", &draft)?;
-                Ok(agent_kernel::StepExecution {
-                    context,
-                    transition: agent_kernel::StepTransition::Complete {
-                        output_artifact: Some("result"),
-                        qualified: gate.passed,
-                    },
-                })
+                let draft = context.state::<String>()?.clone();
+                let gate = context.state::<QualityGate>()?.clone();
+
+                let output = ArtifactEnvelope {
+                    key: "result".into(),
+                    kind: "text".into(),
+                    value: serde_json::to_value(draft).unwrap()
+                };
+
+                Ok(agent_kernel::StepExecution::complete(context, Some(output), gate.passed))
             })
         }
     }
