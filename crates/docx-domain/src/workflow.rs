@@ -32,6 +32,8 @@ pub struct DocxWorkflowConfig {
     pub reviewer_model: String,
     pub min_score: u8,
     pub max_refinement_rounds: usize,
+    /// The maximum number of turns for the tool-calling agent in the refinement phase.
+    pub refinement_max_turns: usize,
     pub search_max_results: usize,
     pub fetch_concurrency_limit: usize,
     pub search_hint_terms: Vec<String>,
@@ -106,6 +108,7 @@ impl Workflow for DocxWorkflow {
                 StepConfig::new(Arc::new(RefineStep {
                     writer_model: self.config.writer_model.clone(),
                     formatter,
+                    max_turns: self.config.refinement_max_turns,
                 })).with_retry(2, 1000),
             ],
         ))
@@ -618,6 +621,7 @@ impl WorkflowStep for FinalizeStep {
 struct RefineStep {
     writer_model: String,
     formatter: DocxPromptFormatter,
+    max_turns: usize,
 }
 
 impl WorkflowStep for RefineStep {
@@ -628,6 +632,8 @@ impl WorkflowStep for RefineStep {
     fn execute<'a>(&self, context: &'a mut WorkflowContext) -> BoxFuture<'a, Result<StepTransition, RunError>> {
         let writer_model = self.writer_model.clone();
         let formatter = self.formatter.clone();
+        let max_turns = self.max_turns;
+
         Box::pin(async move {
             let request: DocxExpandRequest = context.input_as()?;
             let document: Document = context.state::<Document>()?.clone();
@@ -663,7 +669,10 @@ impl WorkflowStep for RefineStep {
                 });
             }
 
-            let agent = builder.build();
+            let agent = builder
+                .default_max_turns(max_turns) // Use the configured max turns limit
+                .build();
+
 
             let refinement_prompt = formatter.refinement_prompt(
                 &prompt_context,

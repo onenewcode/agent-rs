@@ -80,21 +80,31 @@ impl agent_kernel::LanguageModel for OpenRouterModel {
                     }
                     Err(error) => {
                         let message = error.to_string();
-                        if is_retryable_error(&message) && attempt < 3 {
+                        // Clean extra blank lines in error message (often seen in 524 errors)
+                        let cleaned_message = if message.contains("\n\n\n") {
+                            message.lines()
+                                .filter(|line| !line.trim().is_empty())
+                                .collect::<Vec<_>>()
+                                .join(" | ")
+                        } else {
+                            message
+                        };
+
+                        if is_retryable_error(&cleaned_message) && attempt < 3 {
                             let delay =
                                 Duration::from_secs(u64::try_from(attempt).unwrap_or(1) * 2);
                             warn!(
                                 model = %self.config.model,
                                 attempt,
                                 delay_secs = delay.as_secs(),
-                                error = %message,
+                                error = %cleaned_message,
                                 "OpenRouter request failed with a retryable error"
                             );
                             tokio::time::sleep(delay).await;
                             continue;
                         }
 
-                        return Err(RunError::Provider(message));
+                        return Err(RunError::Provider(cleaned_message));
                     }
                 }
             }

@@ -240,6 +240,8 @@ pub struct DocxWorkflowFileConfig {
     pub min_score: u8,
     #[serde(default = "DocxWorkflowFileConfig::default_max_refinement_rounds")]
     pub max_refinement_rounds: usize,
+    #[serde(default = "DocxWorkflowFileConfig::default_refinement_max_turns")]
+    pub refinement_max_turns: usize,
     #[serde(default = "DocxWorkflowFileConfig::default_search_max_results")]
     pub search_max_results: usize,
     #[serde(default = "DocxWorkflowFileConfig::default_fetch_concurrency_limit")]
@@ -263,6 +265,10 @@ impl DocxWorkflowFileConfig {
 
     fn default_max_refinement_rounds() -> usize {
         2
+    }
+
+    fn default_refinement_max_turns() -> usize {
+        10
     }
 
     fn default_search_max_results() -> usize {
@@ -458,6 +464,7 @@ fn build_docx_workflow_config(config: &DocxWorkflowFileConfig) -> DocxWorkflowCo
         reviewer_model: config.reviewer_model.clone(),
         min_score: config.min_score,
         max_refinement_rounds: config.max_refinement_rounds,
+        refinement_max_turns: config.refinement_max_turns,
         search_max_results: config.search_max_results,
         fetch_concurrency_limit: config.fetch_concurrency_limit,
         search_hint_terms: config.search_hint_terms.clone(),

@@ -64,12 +64,7 @@ impl WorkflowExecutor {
                 request.options.global_timeout_secs
             };
 
-            timeout(
-                Duration::from_secs(timeout_secs),
-                execute_workflow(services, definition, request, settings.capture_artifacts),
-            )
-            .await
-            .map_err(|_| RunError::Timeout(format!("workflow timed out after {timeout_secs}s")))?
+            execute_workflow(services, definition, request, settings.capture_artifacts, timeout_secs).await
         })
     }
 }
@@ -112,6 +107,7 @@ async fn execute_workflow(
     definition: WorkflowDefinition,
     request: RunRequest,
     capture_artifacts: bool,
+    timeout_secs: u64,
 ) -> Result<RunReport, RunError> {
     let run_started = Instant::now();
     let run_id = generate_run_id(definition.workflow_id);
@@ -123,104 +119,119 @@ async fn execute_workflow(
     );
     let mut events = Vec::new();
     let mut current_step_id = definition.initial_step;
-    let output_artifact;
-    let qualified;
+    let mut output_artifact = None;
+    let mut qualified = false;
     let capture_artifacts = capture_artifacts && request.options.capture_artifacts;
 
-    loop {
-        let step_config = definition.steps.get(current_step_id).ok_or_else(|| {
-            RunError::Workflow(format!(
-                "workflow `{}` tried to execute undefined step `{current_step_id}`",
-                definition.workflow_id
-            ))
-        })?;
+    // Execute with timeout but ensure cleanup and report generation
+    let result: Result<(), RunError> = match timeout(Duration::from_secs(timeout_secs), async {
+        loop {
+            let step_config = definition.steps.get(current_step_id).ok_or_else(|| {
+                RunError::Workflow(format!(
+                    "workflow `{}` tried to execute undefined step `{current_step_id}`",
+                    definition.workflow_id
+                ))
+            })?;
 
-        let mut attempts = 0;
-        let max_attempts = step_config.retry_policy.as_ref().map_or(1, |p| p.max_attempts);
+            let mut attempts = 0;
+            let max_attempts = step_config.retry_policy.as_ref().map_or(1, |p| p.max_attempts);
 
-        let execution_result = loop {
-            events.push(RunEvent {
-                step_id: current_step_id.to_owned(),
-                status: EventStatus::Started,
-                duration_ms: 0,
-                message: if attempts > 0 {
-                    Some(format!("Retry attempt {attempts}"))
-                } else {
-                    None
-                },
-            });
-
-            let step_started = Instant::now();
-            match step_config.step.execute(&mut context).await {
-                Ok(transition) => {
-                    let duration_ms = step_started.elapsed().as_millis();
-                    events.push(RunEvent {
-                        step_id: current_step_id.to_owned(),
-                        status: EventStatus::Succeeded,
-                        duration_ms,
-                        message: None,
-                    });
-                    break Ok(transition);
-                }
-                Err(error) => {
-                    attempts += 1;
-                    let duration_ms = step_started.elapsed().as_millis();
-                    events.push(RunEvent {
-                        step_id: current_step_id.to_owned(),
-                        status: EventStatus::Failed,
-                        duration_ms,
-                        message: Some(error.to_string()),
-                    });
-
-                    if attempts < max_attempts {
-                        let delay = step_config.retry_policy.as_ref().unwrap().base_delay_ms * (2u64.pow(u32::try_from(attempts - 1).unwrap_or(0)));
-                        tracing::warn!(
-                            workflow = definition.workflow_id,
-                            step = current_step_id,
-                            attempt = attempts,
-                            delay_ms = delay,
-                            error = %error,
-                            "Step failed; retrying with backoff"
-                        );
-                        tokio::time::sleep(Duration::from_millis(delay)).await;
+            let execution_result = loop {
+                events.push(RunEvent {
+                    step_id: current_step_id.to_owned(),
+                    status: EventStatus::Started,
+                    duration_ms: 0,
+                    message: if attempts > 0 {
+                        Some(format!("Retry attempt {attempts}"))
                     } else {
-                        break Err(error);
+                        None
+                    },
+                });
+
+                let step_started = Instant::now();
+                match step_config.step.execute(&mut context).await {
+                    Ok(transition) => {
+                        let duration_ms = step_started.elapsed().as_millis();
+                        events.push(RunEvent {
+                            step_id: current_step_id.to_owned(),
+                            status: EventStatus::Succeeded,
+                            duration_ms,
+                            message: None,
+                        });
+                        break Ok(transition);
+                    }
+                    Err(error) => {
+                        attempts += 1;
+                        let duration_ms = step_started.elapsed().as_millis();
+                        events.push(RunEvent {
+                            step_id: current_step_id.to_owned(),
+                            status: EventStatus::Failed,
+                            duration_ms,
+                            message: Some(error.to_string()),
+                        });
+
+                        if attempts < max_attempts {
+                            let delay = step_config.retry_policy.as_ref().unwrap().base_delay_ms * (2u64.pow(u32::try_from(attempts - 1).unwrap_or(0)));
+                            tracing::warn!(
+                                workflow = definition.workflow_id,
+                                step = current_step_id,
+                                attempt = attempts,
+                                delay_ms = delay,
+                                duration_ms = duration_ms,
+                                error = %sanitize_error_msg(&error),
+                                "Step failed; retrying with backoff"
+                            );
+                            tokio::time::sleep(Duration::from_millis(delay)).await;
+                        } else {
+                            tracing::error!(
+                                workflow = definition.workflow_id,
+                                step = current_step_id,
+                                attempts = attempts,
+                                duration_ms = duration_ms,
+                                error = %sanitize_error_msg(&error),
+                                "Step failed and exhausted all retries"
+                            );
+                            break Err(error);
+                        }
+                    }
+                }
+            };
+
+            match execution_result {
+                Ok(transition) => match transition {
+                    StepTransition::Next(next_step) => {
+                        current_step_id = next_step;
+                    }
+                    StepTransition::Complete {
+                        output_artifact: requested_output,
+                        qualified: completed_qualified,
+                    } => {
+                        qualified = completed_qualified;
+                        output_artifact = requested_output;
+                        return Ok(());
+                    }
+                },
+                Err(error) => {
+                    if let Some(fallback) = step_config.fallback_step {
+                        tracing::info!(
+                            workflow = definition.workflow_id,
+                            failed_step = current_step_id,
+                            fallback_step = fallback,
+                            "Transitioning to fallback step after retry exhaustion"
+                        );
+                        current_step_id = fallback;
+                    } else {
+                        return Err(error);
                     }
                 }
             }
-        };
-
-        match execution_result {
-            Ok(transition) => match transition {
-                StepTransition::Next(next_step) => {
-                    current_step_id = next_step;
-                }
-                StepTransition::Complete {
-                    output_artifact: requested_output,
-                    qualified: completed_qualified,
-                } => {
-                    qualified = completed_qualified;
-                    output_artifact = requested_output;
-                    break;
-                }
-            },
-            Err(error) => {
-                if let Some(fallback) = step_config.fallback_step {
-                    tracing::error!(
-                        workflow = definition.workflow_id,
-                        failed_step = current_step_id,
-                        fallback_step = fallback,
-                        error = %error,
-                        "Step exhausted retries; transitioning to fallback step"
-                    );
-                    current_step_id = fallback;
-                } else {
-                    return Err(error);
-                }
-            }
         }
-    }
+    }).await {
+        Ok(res) => res,
+        Err(_) => Err(RunError::Timeout(format!("workflow timed out after {timeout_secs}s"))),
+    };
 
+    // Create report even on failure to ensure persistence of events and artifacts
     let report = RunReport {
         run_id,
         workflow: definition.workflow_id.to_owned(),
@@ -237,11 +248,17 @@ async fn execute_workflow(
         total_duration_ms: run_started.elapsed().as_millis(),
     };
 
+    // Always attempt to persist the report
     if let Some(store) = services.artifact_store() {
-        store.persist(&report).await?;
+        if let Err(err) = store.persist(&report).await {
+            tracing::error!(error = %err, "Failed to persist run report");
+        }
     }
 
-    Ok(report)
+    match result {
+        Ok(()) => Ok(report),
+        Err(err) => Err(err),
+    }
 }
 
 fn generate_run_id(workflow: &str) -> String {
@@ -251,6 +268,26 @@ fn generate_run_id(workflow: &str) -> String {
         .as_millis();
     format!("{workflow}-{millis}")
 }
+
+fn sanitize_error_msg(err: &impl std::fmt::Display) -> String {
+    let s = err.to_string();
+    let trimmed = s.trim();
+
+    // Compress multiple consecutive newlines (common in 524 errors)
+    if trimmed.contains("\n\n\n") {
+        let mut lines = Vec::new();
+        for line in trimmed.lines() {
+            let line_trimmed = line.trim();
+            if !line_trimmed.is_empty() {
+                lines.push(line_trimmed);
+            }
+        }
+        return lines.join(" | "); // Join with pipe for compactness
+    }
+
+    trimmed.to_owned()
+}
+
 
 #[cfg(test)]
 mod tests {

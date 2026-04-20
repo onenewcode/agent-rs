@@ -39,6 +39,7 @@ reviewer_model = "reviewer"
 planner_model = "writer"
 min_score = 80
 max_refinement_rounds = 3
+refinement_max_turns = 10
 search_max_results = 5
 fetch_concurrency_limit = 5
 document_tokens = 4000
