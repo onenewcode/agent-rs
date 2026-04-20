@@ -5,6 +5,9 @@ edition.workspace = true
 
 [dependencies]
 agent-kernel = { path = "../agent-kernel" }
+agent-tools = { path = "../agent-tools" }
+reqwest.workspace = true
+rig.workspace = true
 roxmltree.workspace = true
 serde.workspace = true
 serde_json.workspace = true

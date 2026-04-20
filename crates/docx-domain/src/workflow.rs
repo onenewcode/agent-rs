@@ -1,10 +1,11 @@
 use std::{collections::HashSet, path::PathBuf, sync::Arc};
 
 use agent_kernel::{
-    BoxFuture, DocumentParser, QualityGate, RetryPolicy, RunError, RunRequest, SearchProvider,
-    SourceFetcher, SourceMaterial, StepExecution, StepTransition, Workflow, WorkflowContext,
+    BoxFuture, DocumentParser, QualityGate, RunError, RunRequest, SearchProvider,
+    SourceFetcher, SourceMaterial, StepConfig, StepTransition, Workflow, WorkflowContext,
     WorkflowDefinition, WorkflowStep,
 };
+use rig::completion::Prompt;
 use serde::Deserialize;
 use tokio::{sync::Semaphore, task::JoinSet};
 use tracing::warn;
@@ -75,44 +76,39 @@ impl Workflow for DocxWorkflow {
 
         Ok(WorkflowDefinition::new(
             self.id(),
+            "parse_document",
             vec![
-                Arc::new(ParseDocumentStep {
+                StepConfig::new(Arc::new(ParseDocumentStep {
                     parser: self.parser,
-                }),
-                Arc::new(PlanStep {
+                })),
+                StepConfig::new(Arc::new(PlanStep {
                     planner_model: self.config.planner_model.clone(),
                     formatter: formatter.clone(),
                     search_hint_terms: self.config.search_hint_terms.clone(),
                     search_negation_terms: self.config.search_negation_terms.clone(),
                     max_refinement_rounds: self.config.max_refinement_rounds,
-                }),
-                Arc::new(ResearchStep {
+                })).with_retry(2, 500),
+                StepConfig::new(Arc::new(ResearchStep {
                     search_max_results: self.config.search_max_results,
                     fetch_concurrency_limit: self.config.fetch_concurrency_limit,
-                }),
-                Arc::new(GenerateStep {
+                })).with_retry(3, 1000),
+                StepConfig::new(Arc::new(GenerateStep {
                     writer_model: self.config.writer_model.clone(),
                     formatter: formatter.clone(),
-                }),
-                Arc::new(EvaluateStep {
+                })).with_retry(2, 1000),
+                StepConfig::new(Arc::new(EvaluateStep {
                     reviewer_model: self.config.reviewer_model.clone(),
                     formatter: formatter.clone(),
                     min_score: self.config.min_score,
-                }),
-                Arc::new(FinalizeStep),
-                Arc::new(RefineStep {
+                    max_attempts: self.config.max_refinement_rounds,
+                })).with_retry(2, 500),
+                StepConfig::new(Arc::new(FinalizeStep)),
+                StepConfig::new(Arc::new(RefineStep {
                     writer_model: self.config.writer_model.clone(),
                     formatter,
-                }),
+                })).with_retry(2, 1000),
             ],
-        )
-        .with_retry_policy(RetryPolicy {
-            gate_step: "evaluate",
-            gate_artifact: QUALITY_GATE_ARTIFACT,
-            retry_from_step: "refine",
-            max_attempts: self.config.max_refinement_rounds,
-        })
-        .with_default_output_artifact(FINAL_OUTPUT_ARTIFACT))
+        ))
     }
 }
 
@@ -126,13 +122,14 @@ impl WorkflowStep for ParseDocumentStep {
         "parse_document"
     }
 
-    fn execute(&self, mut context: WorkflowContext) -> BoxFuture<'static, Result<StepExecution, RunError>> {
+    fn execute<'a>(&self, context: &'a mut WorkflowContext) -> BoxFuture<'a, Result<StepTransition, RunError>> {
         let parser = self.parser;
         Box::pin(async move {
             let request: DocxExpandRequest = context.input_as()?;
             let document = parser.parse_path(&PathBuf::from(request.document_path))?;
-            context.insert_artifact(DOCUMENT_ARTIFACT, "docx.document", &document)?;
-            Ok(StepExecution::continue_with(context))
+            context.emit_artifact(DOCUMENT_ARTIFACT, "docx.document", &document)?;
+            context.insert_state(document);
+            Ok(StepTransition::Next("plan"))
         })
     }
 }
@@ -151,7 +148,7 @@ impl WorkflowStep for PlanStep {
         "plan"
     }
 
-    fn execute(&self, mut context: WorkflowContext) -> BoxFuture<'static, Result<StepExecution, RunError>> {
+    fn execute<'a>(&self, context: &'a mut WorkflowContext) -> BoxFuture<'a, Result<StepTransition, RunError>> {
         let planner_model = self.planner_model.clone();
         let formatter = self.formatter.clone();
         let hint_terms = self.search_hint_terms.clone();
@@ -160,7 +157,7 @@ impl WorkflowStep for PlanStep {
 
         Box::pin(async move {
             let request: DocxExpandRequest = context.input_as()?;
-            let document: Document = context.artifact(DOCUMENT_ARTIFACT)?;
+            let document: Document = context.state::<Document>()?.clone();
             let llm = planner_model
                 .as_deref()
                 .map(|name| context.services.llm(name))
@@ -168,7 +165,7 @@ impl WorkflowStep for PlanStep {
 
             let plan = if let Some(llm) = llm {
                 let prompt = formatter.planning_prompt(&request, &document);
-                match llm.complete(&prompt).await {
+                match llm.complete(context, &prompt).await {
                     Ok(response) => {
                         parse_llm_plan(&response, max_refinement_rounds).unwrap_or_else(|| {
                             warn!("planner response was invalid JSON; falling back to heuristics");
@@ -202,8 +199,9 @@ impl WorkflowStep for PlanStep {
                 )
             };
 
-            context.insert_artifact(PLAN_ARTIFACT, "docx.plan", &plan)?;
-            Ok(StepExecution::continue_with(context))
+            context.emit_artifact(PLAN_ARTIFACT, "docx.plan", &plan)?;
+            context.insert_state(plan);
+            Ok(StepTransition::Next("research"))
         })
     }
 }
@@ -305,20 +303,21 @@ impl WorkflowStep for ResearchStep {
         "research"
     }
 
-    fn execute(&self, mut context: WorkflowContext) -> BoxFuture<'static, Result<StepExecution, RunError>> {
+    fn execute<'a>(&self, context: &'a mut WorkflowContext) -> BoxFuture<'a, Result<StepTransition, RunError>> {
         let search_max_results = self.search_max_results;
         let fetch_concurrency_limit = self.fetch_concurrency_limit;
         Box::pin(async move {
             let request: DocxExpandRequest = context.input_as()?;
-            let plan: DocxPlan = context.artifact(PLAN_ARTIFACT)?;
+            let plan: DocxPlan = context.state::<DocxPlan>()?.clone();
             let fetcher = context.services.source_fetcher()?;
             let search_provider = context.services.search_provider();
 
-            let user_sources =
-                collect_user_sources(fetcher, &request.user_urls, fetch_concurrency_limit).await;
-            let search_sources =
-                collect_search_sources(search_provider, &plan, search_max_results).await?;
+            let (user_sources, search_sources_res) = tokio::join!(
+                collect_user_sources(fetcher, &request.user_urls, fetch_concurrency_limit),
+                collect_search_sources(search_provider, &plan, search_max_results, fetch_concurrency_limit)
+            );
 
+            let search_sources = search_sources_res?;
             let mut queries = plan.search_queries.clone();
             let mut sources = user_sources;
             sources.extend(search_sources);
@@ -326,8 +325,9 @@ impl WorkflowStep for ResearchStep {
             queries.dedup();
 
             let research = DocxResearchArtifacts { queries, sources };
-            context.insert_artifact(RESEARCH_ARTIFACT, "docx.research", &research)?;
-            Ok(StepExecution::continue_with(context))
+            context.emit_artifact(RESEARCH_ARTIFACT, "docx.research", &research)?;
+            context.insert_state(research);
+            Ok(StepTransition::Next("generate"))
         })
     }
 }
@@ -373,6 +373,7 @@ async fn collect_search_sources(
     search_provider: Option<Arc<dyn SearchProvider>>,
     plan: &DocxPlan,
     max_results: usize,
+    concurrency_limit: usize,
 ) -> Result<Vec<SourceMaterial>, RunError> {
     match plan.search_mode {
         crate::model::SearchMode::Disabled => Ok(Vec::new()),
@@ -391,16 +392,41 @@ async fn collect_search_sources(
                 return Ok(Vec::new());
             };
 
-            let mut sources = Vec::new();
+            let semaphore = Arc::new(Semaphore::new(concurrency_limit.max(1)));
+            let mut set = JoinSet::new();
+
             for query in &plan.search_queries {
-                match search_provider.search(query, max_results).await {
-                    Ok(mut results) => sources.append(&mut results),
-                    Err(error) => {
-                        if matches!(plan.search_mode, crate::model::SearchMode::Required) {
-                            return Err(error);
-                        }
-                        warn!(query, error = %error, "optional search query failed");
-                    }
+                let search_provider = Arc::clone(&search_provider);
+                let semaphore = Arc::clone(&semaphore);
+                let query = query.clone();
+                let search_mode = plan.search_mode.clone();
+
+                set.spawn(async move {
+                    let _permit = semaphore
+                        .acquire_owned()
+                        .await
+                        .map_err(|error| RunError::Internal(error.to_string()))?;
+
+                    search_provider
+                        .search(&query, max_results)
+                        .await
+                        .map_err(|error| {
+                            if matches!(search_mode, crate::model::SearchMode::Required) {
+                                error
+                            } else {
+                                warn!(query, error = %error, "optional search query failed");
+                                RunError::Internal("ignoring optional search failure".to_owned())
+                            }
+                        })
+                });
+            }
+
+            let mut sources = Vec::new();
+            while let Some(result) = set.join_next().await {
+                match result {
+                    Ok(Ok(mut results)) => sources.append(&mut results),
+                    Ok(Err(_)) => {} // Already warned above if optional, or it was Required and returned the error
+                    Err(error) => warn!(error = %error, "search query task failed"),
                 }
             }
 
@@ -425,14 +451,14 @@ impl WorkflowStep for GenerateStep {
         "generate"
     }
 
-    fn execute(&self, mut context: WorkflowContext) -> BoxFuture<'static, Result<StepExecution, RunError>> {
+    fn execute<'a>(&self, context: &'a mut WorkflowContext) -> BoxFuture<'a, Result<StepTransition, RunError>> {
         let writer_model = self.writer_model.clone();
         let formatter = self.formatter.clone();
         Box::pin(async move {
             let request: DocxExpandRequest = context.input_as()?;
-            let document: Document = context.artifact(DOCUMENT_ARTIFACT)?;
-            let plan: DocxPlan = context.artifact(PLAN_ARTIFACT)?;
-            let research: DocxResearchArtifacts = context.artifact(RESEARCH_ARTIFACT)?;
+            let document: Document = context.state::<Document>()?.clone();
+            let plan: DocxPlan = context.state::<DocxPlan>()?.clone();
+            let research: DocxResearchArtifacts = context.state::<DocxResearchArtifacts>()?.clone();
             let llm = context.services.llm(&writer_model)?;
             let prompt_context = DocxPromptContext {
                 request,
@@ -441,20 +467,18 @@ impl WorkflowStep for GenerateStep {
                 research,
             };
             let outline = llm
-                .complete(&formatter.outline_prompt(&prompt_context))
+                .complete(context, &formatter.outline_prompt(&prompt_context))
                 .await?;
             let markdown = llm
-                .complete(&formatter.generation_prompt(&prompt_context, &outline))
+                .complete(context, &formatter.generation_prompt(&prompt_context, &outline))
                 .await?;
-            context.insert_artifact(
-                DRAFT_ARTIFACT,
-                "docx.draft",
-                &DocxDraft {
-                    content: markdown,
-                    outline: Some(outline),
-                },
-            )?;
-            Ok(StepExecution::continue_with(context))
+            let draft = DocxDraft {
+                content: markdown,
+                outline: Some(outline),
+            };
+            context.emit_artifact(DRAFT_ARTIFACT, "docx.draft", &draft)?;
+            context.insert_state(draft);
+            Ok(StepTransition::Next("evaluate"))
         })
     }
 }
@@ -464,23 +488,28 @@ struct EvaluateStep {
     reviewer_model: String,
     formatter: DocxPromptFormatter,
     min_score: u8,
+    max_attempts: usize,
 }
+
+struct RefinementCounter(usize);
 
 impl WorkflowStep for EvaluateStep {
     fn id(&self) -> &'static str {
         "evaluate"
     }
 
-    fn execute(&self, mut context: WorkflowContext) -> BoxFuture<'static, Result<StepExecution, RunError>> {
+    fn execute<'a>(&self, context: &'a mut WorkflowContext) -> BoxFuture<'a, Result<StepTransition, RunError>> {
         let reviewer_model = self.reviewer_model.clone();
         let formatter = self.formatter.clone();
         let min_score = self.min_score;
+        let max_attempts = self.max_attempts;
+
         Box::pin(async move {
             let request: DocxExpandRequest = context.input_as()?;
-            let document: Document = context.artifact(DOCUMENT_ARTIFACT)?;
-            let plan: DocxPlan = context.artifact(PLAN_ARTIFACT)?;
-            let research: DocxResearchArtifacts = context.artifact(RESEARCH_ARTIFACT)?;
-            let draft: DocxDraft = context.artifact(DRAFT_ARTIFACT)?;
+            let document: Document = context.state::<Document>()?.clone();
+            let plan: DocxPlan = context.state::<DocxPlan>()?.clone();
+            let research: DocxResearchArtifacts = context.state::<DocxResearchArtifacts>()?.clone();
+            let draft: DocxDraft = context.state::<DocxDraft>()?.clone();
             let llm = context.services.llm(&reviewer_model)?;
             let prompt_context = DocxPromptContext {
                 request,
@@ -489,30 +518,40 @@ impl WorkflowStep for EvaluateStep {
                 research,
             };
             let response = llm
-                .complete(&formatter.evaluation_prompt(&prompt_context, &draft.content))
+                .complete(context, &formatter.evaluation_prompt(&prompt_context, &draft.content))
                 .await?;
             let mut evaluation = parse_evaluation_response(&response)?;
-            evaluation.qualified = evaluation.score >= min_score;
+            // Qualification: Score threshold + minimum quality in key dimensions
+            evaluation.qualified = evaluation.score >= min_score 
+                && evaluation.faithfulness_score >= 3
+                && evaluation.relevance_score >= 3;
             let gate: QualityGate = evaluation.clone().into();
 
-            context.insert_artifact(EVALUATION_ARTIFACT, "docx.evaluation", &evaluation)?;
-            context.insert_artifact(QUALITY_GATE_ARTIFACT, "quality_gate", &gate)?;
+            context.emit_artifact(EVALUATION_ARTIFACT, "docx.evaluation", &evaluation)?;
+            context.emit_artifact(QUALITY_GATE_ARTIFACT, "quality_gate", &gate)?;
+            context.insert_state(evaluation.clone());
 
             let mut attempts = context
-                .artifacts
-                .get::<Vec<DocxAttemptRecord>>(ATTEMPTS_ARTIFACT)
+                .state::<Vec<DocxAttemptRecord>>()
+                .cloned()
                 .unwrap_or_default();
-            attempts.push(DocxAttemptRecord {
-                attempt: context.attempt,
-                draft,
-                evaluation,
-            });
-            context.insert_artifact(ATTEMPTS_ARTIFACT, "docx.attempts", &attempts)?;
+            
+            let current_attempt = context.state::<RefinementCounter>().map_or(0, |c| c.0);
 
-            Ok(StepExecution {
-                context,
-                transition: StepTransition::JumpTo("finalize"),
-            })
+            attempts.push(DocxAttemptRecord {
+                attempt: current_attempt,
+                draft,
+                evaluation: evaluation.clone(),
+            });
+            context.insert_state(attempts.clone());
+            context.emit_artifact(ATTEMPTS_ARTIFACT, "docx.attempts", &attempts)?;
+
+            if evaluation.qualified || current_attempt >= max_attempts {
+                Ok(StepTransition::Next("finalize"))
+            } else {
+                context.insert_state(RefinementCounter(current_attempt + 1));
+                Ok(StepTransition::Next("refine"))
+            }
         })
     }
 }
@@ -521,6 +560,12 @@ impl WorkflowStep for EvaluateStep {
 struct EvaluationPayload {
     score: u8,
     reason: String,
+    #[serde(default)]
+    faithfulness_score: u8,
+    #[serde(default)]
+    relevance_score: u8,
+    #[serde(default)]
+    accuracy_score: u8,
 }
 
 fn parse_evaluation_response(response: &str) -> Result<DocxEvaluation, RunError> {
@@ -536,6 +581,9 @@ fn parse_evaluation_response(response: &str) -> Result<DocxEvaluation, RunError>
         score: payload.score,
         reason: payload.reason,
         qualified: false,
+        faithfulness_score: payload.faithfulness_score,
+        relevance_score: payload.relevance_score,
+        accuracy_score: payload.accuracy_score,
     })
 }
 
@@ -546,23 +594,21 @@ impl WorkflowStep for FinalizeStep {
         "finalize"
     }
 
-    fn execute(&self, mut context: WorkflowContext) -> BoxFuture<'static, Result<StepExecution, RunError>> {
+    fn execute<'a>(&self, context: &'a mut WorkflowContext) -> BoxFuture<'a, Result<StepTransition, RunError>> {
         Box::pin(async move {
-            let draft: DocxDraft = context.artifact(DRAFT_ARTIFACT)?;
-            let evaluation: DocxEvaluation = context.artifact(EVALUATION_ARTIFACT)?;
+            let draft: DocxDraft = context.state::<DocxDraft>()?.clone();
+            let evaluation: DocxEvaluation = context.state::<DocxEvaluation>()?.clone();
             let output = DocxFinalOutput {
                 markdown: draft.content,
                 score: evaluation.score,
                 qualified: evaluation.qualified,
                 reason: evaluation.reason,
             };
-            context.insert_artifact(FINAL_OUTPUT_ARTIFACT, "docx.final_output", &output)?;
-            Ok(StepExecution {
-                context,
-                transition: StepTransition::Complete {
-                    output_artifact: Some(FINAL_OUTPUT_ARTIFACT),
-                    qualified: output.qualified,
-                },
+            context.emit_artifact(FINAL_OUTPUT_ARTIFACT, "docx.final_output", &output)?;
+            let output_artifact = context.artifacts.last().cloned();
+            Ok(StepTransition::Complete {
+                output_artifact,
+                qualified: output.qualified,
             })
         })
     }
@@ -579,42 +625,70 @@ impl WorkflowStep for RefineStep {
         "refine"
     }
 
-    fn execute(&self, mut context: WorkflowContext) -> BoxFuture<'static, Result<StepExecution, RunError>> {
+    fn execute<'a>(&self, context: &'a mut WorkflowContext) -> BoxFuture<'a, Result<StepTransition, RunError>> {
         let writer_model = self.writer_model.clone();
         let formatter = self.formatter.clone();
         Box::pin(async move {
             let request: DocxExpandRequest = context.input_as()?;
-            let document: Document = context.artifact(DOCUMENT_ARTIFACT)?;
-            let plan: DocxPlan = context.artifact(PLAN_ARTIFACT)?;
-            let research: DocxResearchArtifacts = context.artifact(RESEARCH_ARTIFACT)?;
-            let draft: DocxDraft = context.artifact(DRAFT_ARTIFACT)?;
-            let evaluation: DocxEvaluation = context.artifact(EVALUATION_ARTIFACT)?;
+            let document: Document = context.state::<Document>()?.clone();
+            let plan: DocxPlan = context.state::<DocxPlan>()?.clone();
+            let research: DocxResearchArtifacts = context.state::<DocxResearchArtifacts>()?.clone();
+            let draft: DocxDraft = context.state::<DocxDraft>()?.clone();
+            let evaluation: DocxEvaluation = context.state::<DocxEvaluation>()?.clone();
             let llm = context.services.llm(&writer_model)?;
+            let search_provider = context.services.search_provider();
+            let trajectory = context.state::<agent_kernel::AgentTrajectory>()?.clone();
+            let trajectory_wrapper = Arc::new(tokio::sync::Mutex::new(trajectory));
+
             let prompt_context = DocxPromptContext {
                 request,
                 document,
                 plan,
                 research,
             };
-            let refined = llm
-                .complete(&formatter.refinement_prompt(
-                    &prompt_context,
-                    &draft.content,
-                    &evaluation.reason,
-                ))
-                .await?;
-            context.insert_artifact(
-                DRAFT_ARTIFACT,
-                "docx.draft",
-                &DocxDraft {
-                    content: refined,
-                    outline: draft.outline,
-                },
-            )?;
-            Ok(StepExecution {
-                context,
-                transition: StepTransition::JumpTo("evaluate"),
-            })
+
+            // Use tool-enabled agent for refinement
+            let content_wrapper = Arc::new(tokio::sync::RwLock::new(draft.content.clone()));
+            let edit_tool = agent_tools::EditDocumentTool {
+                current_content: Arc::clone(&content_wrapper),
+                trajectory: Arc::clone(&trajectory_wrapper),
+            };
+
+            let mut builder = llm.agent_builder().tool(edit_tool);
+
+            if let Some(search) = search_provider {
+                builder = builder.tool(agent_tools::WebSearchTool {
+                    provider: search,
+                    trajectory: Arc::clone(&trajectory_wrapper),
+                });
+            }
+
+            let agent = builder.build();
+
+            let refinement_prompt = formatter.refinement_prompt(
+                &prompt_context,
+                &draft.content,
+                &evaluation.reason,
+            );
+
+            // The agent will call tools to modify content_wrapper
+            let _response = agent
+                .prompt(&refinement_prompt)
+                .await
+                .map_err(|e| RunError::Provider(e.to_string()))?;
+
+            let refined_content = content_wrapper.read().await.clone();
+            let traj = trajectory_wrapper.lock().await.clone();
+            context.insert_state(traj);
+
+            let refined_draft = DocxDraft {
+                content: refined_content,
+                outline: draft.outline,
+            };
+
+            context.emit_artifact(DRAFT_ARTIFACT, "docx.draft", &refined_draft)?;
+            context.insert_state(refined_draft);
+            Ok(StepTransition::Next("evaluate"))
         })
     }
 }

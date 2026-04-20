@@ -7,8 +7,8 @@ use std::{
 };
 
 use agent_kernel::{
-    ArtifactEnvelope, CapabilityRegistry, EventStatus, QualityGate, RunError, RunEvent, RunReport,
-    RunRequest, StepTransition, Workflow, WorkflowContext, WorkflowDefinition,
+    CapabilityRegistry, EventStatus, RunError, RunEvent, RunReport, RunRequest, StepTransition,
+    Workflow, WorkflowContext, WorkflowDefinition,
 };
 use tokio::time::timeout;
 
@@ -122,102 +122,101 @@ async fn execute_workflow(
         services.clone(),
     );
     let mut events = Vec::new();
-    let step_index = definition
-        .steps
-        .iter()
-        .enumerate()
-        .map(|(index, step)| (step.id(), index))
-        .collect::<BTreeMap<_, _>>();
-    let mut current_index = 0usize;
-    let mut output_artifact = None::<ArtifactEnvelope>;
-    let mut qualified = false;
-    let mut retry_attempts = 0usize;
+    let mut current_step_id = definition.initial_step;
+    let output_artifact;
+    let qualified;
     let capture_artifacts = capture_artifacts && request.options.capture_artifacts;
 
-    while current_index < definition.steps.len() {
-        let step = &definition.steps[current_index];
-        let step_id = step.id();
-        let attempt = context.attempt;
-        events.push(RunEvent {
-            step_id: step_id.to_owned(),
-            attempt,
-            status: EventStatus::Started,
-            duration_ms: 0,
-            message: None,
-        });
+    loop {
+        let step_config = definition.steps.get(current_step_id).ok_or_else(|| {
+            RunError::Workflow(format!(
+                "workflow `{}` tried to execute undefined step `{current_step_id}`",
+                definition.workflow_id
+            ))
+        })?;
 
-        let step_started = Instant::now();
-        let execution = step.execute(context).await;
+        let mut attempts = 0;
+        let max_attempts = step_config.retry_policy.as_ref().map_or(1, |p| p.max_attempts);
 
-        match execution {
-            Ok(execution) => {
-                let duration_ms = step_started.elapsed().as_millis();
-                context = execution.context;
-                events.push(RunEvent {
-                    step_id: step_id.to_owned(),
-                    attempt,
-                    status: EventStatus::Succeeded,
-                    duration_ms,
-                    message: None,
-                });
+        let execution_result = loop {
+            events.push(RunEvent {
+                step_id: current_step_id.to_owned(),
+                status: EventStatus::Started,
+                duration_ms: 0,
+                message: if attempts > 0 {
+                    Some(format!("Retry attempt {attempts}"))
+                } else {
+                    None
+                },
+            });
 
-                if let Some(policy) = &definition.retry_policy
-                    && step_id == policy.gate_step
-                {
-                    let gate = context.artifact::<QualityGate>(policy.gate_artifact)?;
-                    if !gate.passed && retry_attempts < policy.max_attempts {
-                        retry_attempts += 1;
-                        context.attempt = retry_attempts;
-                        events.push(RunEvent {
-                            step_id: step_id.to_owned(),
-                            attempt: context.attempt,
-                            status: EventStatus::Retrying,
-                            duration_ms: 0,
-                            message: Some(gate.reason),
-                        });
-                        current_index = *step_index.get(policy.retry_from_step).ok_or_else(|| {
-                            RunError::Workflow(format!(
-                                "retry step `{}` is not defined in workflow `{}`",
-                                policy.retry_from_step, definition.workflow_id
-                            ))
-                        })?;
-                        continue;
-                    }
+            let step_started = Instant::now();
+            match step_config.step.execute(&mut context).await {
+                Ok(transition) => {
+                    let duration_ms = step_started.elapsed().as_millis();
+                    events.push(RunEvent {
+                        step_id: current_step_id.to_owned(),
+                        status: EventStatus::Succeeded,
+                        duration_ms,
+                        message: None,
+                    });
+                    break Ok(transition);
                 }
+                Err(error) => {
+                    attempts += 1;
+                    let duration_ms = step_started.elapsed().as_millis();
+                    events.push(RunEvent {
+                        step_id: current_step_id.to_owned(),
+                        status: EventStatus::Failed,
+                        duration_ms,
+                        message: Some(error.to_string()),
+                    });
 
-                match execution.transition {
-                    StepTransition::Continue => {
-                        current_index += 1;
-                    }
-                    StepTransition::JumpTo(step_id) => {
-                        current_index = *step_index.get(step_id).ok_or_else(|| {
-                            RunError::Workflow(format!(
-                                "workflow `{}` tried to jump to undefined step `{step_id}`",
-                                definition.workflow_id
-                            ))
-                        })?;
-                    }
-                    StepTransition::Complete {
-                        output_artifact: requested_output,
-                        qualified: completed_qualified,
-                    } => {
-                        qualified = completed_qualified;
-                        output_artifact = requested_output
-                            .or(definition.default_output_artifact)
-                            .and_then(|key| context.artifacts.get_envelope(key));
-                        break;
+                    if attempts < max_attempts {
+                        let delay = step_config.retry_policy.as_ref().unwrap().base_delay_ms * (2u64.pow(u32::try_from(attempts - 1).unwrap_or(0)));
+                        tracing::warn!(
+                            workflow = definition.workflow_id,
+                            step = current_step_id,
+                            attempt = attempts,
+                            delay_ms = delay,
+                            error = %error,
+                            "Step failed; retrying with backoff"
+                        );
+                        tokio::time::sleep(Duration::from_millis(delay)).await;
+                    } else {
+                        break Err(error);
                     }
                 }
             }
+        };
+
+        match execution_result {
+            Ok(transition) => match transition {
+                StepTransition::Next(next_step) => {
+                    current_step_id = next_step;
+                }
+                StepTransition::Complete {
+                    output_artifact: requested_output,
+                    qualified: completed_qualified,
+                } => {
+                    qualified = completed_qualified;
+                    output_artifact = requested_output;
+                    break;
+                }
+            },
             Err(error) => {
-                events.push(RunEvent {
-                    step_id: step_id.to_owned(),
-                    attempt,
-                    status: EventStatus::Failed,
-                    duration_ms: step_started.elapsed().as_millis(),
-                    message: Some(error.to_string()),
-                });
-                return Err(error);
+                if let Some(fallback) = step_config.fallback_step {
+                    tracing::error!(
+                        workflow = definition.workflow_id,
+                        failed_step = current_step_id,
+                        fallback_step = fallback,
+                        error = %error,
+                        "Step exhausted retries; transitioning to fallback step"
+                    );
+                    current_step_id = fallback;
+                } else {
+                    return Err(error);
+                }
             }
         }
     }
@@ -228,11 +227,13 @@ async fn execute_workflow(
         qualified,
         output_artifact,
         artifacts: if capture_artifacts {
-            context.artifacts.values()
+            context.artifacts.clone()
         } else {
             Vec::new()
         },
         events,
+        telemetry: context.state::<agent_kernel::Telemetry>().cloned().unwrap_or_default(),
+        trajectory: context.state::<agent_kernel::AgentTrajectory>().cloned().unwrap_or_default(),
         total_duration_ms: run_started.elapsed().as_millis(),
     };
 
@@ -260,8 +261,8 @@ mod tests {
 
     use agent_kernel::{
         ArtifactStore, CapabilityRegistry, DocumentParser, LanguageModel, QualityGate,
-        RunOptions, SearchProvider, SourceFetcher, StepExecution, Workflow, WorkflowDefinition,
-        WorkflowStep,
+        RunOptions, SearchProvider, SourceFetcher, Workflow, WorkflowDefinition,
+        WorkflowStep, ArtifactEnvelope,
     };
 
     use super::{ExecutorSettings, WorkflowExecutor};
@@ -270,7 +271,7 @@ mod tests {
 
     impl CapabilityRegistry for EmptyServices {
         fn llm(&self, _name: &str) -> Result<Arc<dyn LanguageModel>, agent_kernel::RunError> {
-            Err(agent_kernel::RunError::Internal("no llm configured".to_owned()))
+            Ok(Arc::new(MockLlm))
         }
 
         fn source_fetcher(
@@ -288,6 +289,18 @@ mod tests {
         }
     }
 
+    struct MockLlm;
+
+    impl LanguageModel for MockLlm {
+        fn complete<'a>(&'a self, _context: &'a mut agent_kernel::WorkflowContext, _prompt: &str) -> agent_kernel::BoxFuture<'a, Result<String, agent_kernel::RunError>> {
+            Box::pin(async { Ok("mock response".to_string()) })
+        }
+
+        fn agent_builder(&self) -> rig::agent::AgentBuilder<rig::providers::openrouter::completion::CompletionModel> {
+            panic!("agent_builder not implemented for MockLlm");
+        }
+    }
+
     struct GateWorkflow;
 
     impl Workflow for GateWorkflow {
@@ -301,22 +314,18 @@ mod tests {
         ) -> Result<WorkflowDefinition, agent_kernel::RunError> {
             Ok(WorkflowDefinition::new(
                 self.id(),
+                "generate",
                 vec![
-                    Arc::new(GenerateStep),
-                    Arc::new(EvaluateStep),
-                    Arc::new(FinalizeStep),
-                    Arc::new(RefineStep),
+                    agent_kernel::StepConfig::new(Arc::new(GenerateStep)),
+                    agent_kernel::StepConfig::new(Arc::new(EvaluateStep)),
+                    agent_kernel::StepConfig::new(Arc::new(FinalizeStep)),
+                    agent_kernel::StepConfig::new(Arc::new(RefineStep)),
                 ],
-            )
-            .with_retry_policy(agent_kernel::RetryPolicy {
-                gate_step: "evaluate",
-                gate_artifact: "quality_gate",
-                retry_from_step: "refine",
-                max_attempts: 2,
-            })
-            .with_default_output_artifact("result"))
+            ))
         }
     }
+
+    struct AttemptCount(usize);
 
     struct GenerateStep;
 
@@ -325,13 +334,14 @@ mod tests {
             "generate"
         }
 
-        fn execute(
+        fn execute<'a>(
             &self,
-            mut context: agent_kernel::WorkflowContext,
-        ) -> agent_kernel::BoxFuture<'static, Result<StepExecution, agent_kernel::RunError>> {
+            context: &'a mut agent_kernel::WorkflowContext,
+        ) -> agent_kernel::BoxFuture<'a, Result<agent_kernel::StepTransition, agent_kernel::RunError>> {
             Box::pin(async move {
-                context.insert_artifact("draft", "text", &format!("draft-{}", context.attempt))?;
-                Ok(StepExecution::continue_with(context))
+                context.insert_state(AttemptCount(0));
+                context.insert_state("draft-0".to_string());
+                Ok(agent_kernel::StepTransition::Next("evaluate"))
             })
         }
     }
@@ -343,16 +353,17 @@ mod tests {
             "evaluate"
         }
 
-        fn execute(
+        fn execute<'a>(
             &self,
-            mut context: agent_kernel::WorkflowContext,
-        ) -> agent_kernel::BoxFuture<'static, Result<StepExecution, agent_kernel::RunError>> {
+            context: &'a mut agent_kernel::WorkflowContext,
+        ) -> agent_kernel::BoxFuture<'a, Result<agent_kernel::StepTransition, agent_kernel::RunError>> {
             Box::pin(async move {
-                let passed = context.attempt > 0;
-                context.insert_artifact(
-                    "quality_gate",
-                    "quality_gate",
-                    &QualityGate {
+                let passed = {
+                    let attempt = context.state::<AttemptCount>()?.0;
+                    attempt > 0
+                };
+                context.insert_state(
+                    QualityGate {
                         score: if passed { 90 } else { 40 },
                         passed,
                         reason: if passed {
@@ -360,12 +371,20 @@ mod tests {
                         } else {
                             "needs work".to_owned()
                         },
-                    },
-                )?;
-                Ok(agent_kernel::StepExecution {
-                    context,
-                    transition: agent_kernel::StepTransition::JumpTo("finalize"),
-                })
+                    }
+                );
+                
+                if passed {
+                    Ok(agent_kernel::StepTransition::Next("finalize"))
+                } else {
+                    let attempt = context.state_mut::<AttemptCount>()?;
+                    if attempt.0 < 2 {
+                        attempt.0 += 1;
+                        Ok(agent_kernel::StepTransition::Next("refine"))
+                    } else {
+                        Ok(agent_kernel::StepTransition::Next("finalize"))
+                    }
+                }
             })
         }
     }
@@ -377,17 +396,14 @@ mod tests {
             "refine"
         }
 
-        fn execute(
+        fn execute<'a>(
             &self,
-            mut context: agent_kernel::WorkflowContext,
-        ) -> agent_kernel::BoxFuture<'static, Result<StepExecution, agent_kernel::RunError>> {
+            context: &'a mut agent_kernel::WorkflowContext,
+        ) -> agent_kernel::BoxFuture<'a, Result<agent_kernel::StepTransition, agent_kernel::RunError>> {
             Box::pin(async move {
-                let draft: String = context.artifact("draft")?;
-                context.insert_artifact("draft", "text", &format!("{draft}-refined"))?;
-                Ok(agent_kernel::StepExecution {
-                    context,
-                    transition: agent_kernel::StepTransition::JumpTo("evaluate"),
-                })
+                let draft = context.state_mut::<String>()?;
+                *draft = format!("{draft}-refined");
+                Ok(agent_kernel::StepTransition::Next("evaluate"))
             })
         }
     }
@@ -399,20 +415,23 @@ mod tests {
             "finalize"
         }
 
-        fn execute(
+        fn execute<'a>(
             &self,
-            mut context: agent_kernel::WorkflowContext,
-        ) -> agent_kernel::BoxFuture<'static, Result<StepExecution, agent_kernel::RunError>> {
+            context: &'a mut agent_kernel::WorkflowContext,
+        ) -> agent_kernel::BoxFuture<'a, Result<agent_kernel::StepTransition, agent_kernel::RunError>> {
             Box::pin(async move {
-                let draft: String = context.artifact("draft")?;
-                let gate: QualityGate = context.artifact("quality_gate")?;
-                context.insert_artifact("result", "text", &draft)?;
-                Ok(agent_kernel::StepExecution {
-                    context,
-                    transition: agent_kernel::StepTransition::Complete {
-                        output_artifact: Some("result"),
-                        qualified: gate.passed,
-                    },
+                let draft = context.state::<String>()?.clone();
+                let gate = context.state::<QualityGate>()?.clone();
+
+                let output = ArtifactEnvelope {
+                    key: "result".into(),
+                    kind: "text".into(),
+                    value: serde_json::to_value(draft).unwrap()
+                };
+
+                Ok(agent_kernel::StepTransition::Complete {
+                    output_artifact: Some(output),
+                    qualified: gate.passed,
                 })
             })
         }

@@ -1,7 +1,8 @@
 #![allow(clippy::missing_errors_doc)]
 
 use std::{
-    collections::BTreeMap,
+    any::{Any, TypeId},
+    collections::HashMap,
     future::Future,
     path::Path,
     pin::Pin,
@@ -98,60 +99,62 @@ pub struct ArtifactEnvelope {
     pub value: Value,
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct ArtifactBag {
-    artifacts: BTreeMap<String, ArtifactEnvelope>,
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenUsage {
+    pub prompt_tokens: usize,
+    pub completion_tokens: usize,
+    pub total_tokens: usize,
 }
 
-impl ArtifactBag {
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Telemetry {
+    pub usage: TokenUsage,
+    pub estimated_cost_usd: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TrajectoryStep {
+    Thought(String),
+    Action {
+        tool: String,
+        input: Value,
+        output: String,
+    },
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentTrajectory {
+    pub steps: Vec<TrajectoryStep>,
+}
+
+// Typed State implementation
+#[derive(Default)]
+pub struct TypeMap {
+    data: HashMap<TypeId, Box<dyn Any + Send + Sync>>,
+}
+
+impl TypeMap {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    pub fn insert<T: Serialize>(
-        &mut self,
-        key: impl Into<String>,
-        kind: impl Into<String>,
-        value: &T,
-    ) -> Result<(), RunError> {
-        let key = key.into();
-        let kind = kind.into();
-        let serialized = serde_json::to_value(value)
-            .map_err(|error| RunError::Artifact(format!("failed to serialize `{key}`: {error}")))?;
-        self.artifacts.insert(
-            key.clone(),
-            ArtifactEnvelope {
-                key,
-                kind,
-                value: serialized,
-            },
-        );
-        Ok(())
-    }
-
-    pub fn get<T: DeserializeOwned>(&self, key: &str) -> Result<T, RunError> {
-        let artifact = self.artifacts.get(key).ok_or_else(|| {
-            RunError::Artifact(format!("artifact `{key}` is not available in the workflow context"))
-        })?;
-        serde_json::from_value(artifact.value.clone()).map_err(|error| {
-            RunError::Artifact(format!("failed to decode artifact `{key}`: {error}"))
-        })
+    pub fn insert<T: Send + Sync + 'static>(&mut self, val: T) {
+        self.data.insert(TypeId::of::<T>(), Box::new(val));
     }
 
     #[must_use]
-    pub fn contains(&self, key: &str) -> bool {
-        self.artifacts.contains_key(key)
+    pub fn get<T: 'static>(&self) -> Option<&T> {
+        self.data
+            .get(&TypeId::of::<T>())
+            .and_then(|b| b.downcast_ref())
     }
 
     #[must_use]
-    pub fn values(&self) -> Vec<ArtifactEnvelope> {
-        self.artifacts.values().cloned().collect()
-    }
-
-    #[must_use]
-    pub fn get_envelope(&self, key: &str) -> Option<ArtifactEnvelope> {
-        self.artifacts.get(key).cloned()
+    pub fn get_mut<T: 'static>(&mut self) -> Option<&mut T> {
+        self.data
+            .get_mut(&TypeId::of::<T>())
+            .and_then(|b| b.downcast_mut())
     }
 }
 
@@ -160,19 +163,17 @@ pub enum EventStatus {
     Started,
     Succeeded,
     Failed,
-    Retrying,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunEvent {
     pub step_id: String,
-    pub attempt: usize,
     pub status: EventStatus,
     pub duration_ms: u128,
     pub message: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RunReport {
     pub run_id: String,
     pub workflow: String,
@@ -180,6 +181,8 @@ pub struct RunReport {
     pub output_artifact: Option<ArtifactEnvelope>,
     pub artifacts: Vec<ArtifactEnvelope>,
     pub events: Vec<RunEvent>,
+    pub telemetry: Telemetry,
+    pub trajectory: AgentTrajectory,
     pub total_duration_ms: u128,
 }
 
@@ -202,7 +205,16 @@ pub trait DocumentParser<T>: Send + Sync {
 }
 
 pub trait LanguageModel: Send + Sync {
-    fn complete(&self, prompt: &str) -> BoxFuture<'_, Result<String, RunError>>;
+    fn complete<'a>(
+        &'a self,
+        context: &'a mut WorkflowContext,
+        prompt: &str,
+    ) -> BoxFuture<'a, Result<String, RunError>>;
+
+    /// Returns a rig AgentBuilder pre-configured with the model and system prompt.
+    fn agent_builder(
+        &self,
+    ) -> rig::agent::AgentBuilder<rig::providers::openrouter::completion::CompletionModel>;
 }
 
 pub trait SourceFetcher: Send + Sync {
@@ -231,9 +243,9 @@ pub trait CapabilityRegistry: Send + Sync {
 pub struct WorkflowContext {
     pub run_id: String,
     pub workflow: String,
-    pub attempt: usize,
     pub input: Value,
-    pub artifacts: ArtifactBag,
+    pub state: TypeMap,
+    pub artifacts: Vec<ArtifactEnvelope>,
     pub services: Arc<dyn CapabilityRegistry>,
 }
 
@@ -245,12 +257,16 @@ impl WorkflowContext {
         input: Value,
         services: Arc<dyn CapabilityRegistry>,
     ) -> Self {
+        let mut state = TypeMap::new();
+        state.insert(Telemetry::default());
+        state.insert(AgentTrajectory::default());
+
         Self {
             run_id,
             workflow,
-            attempt: 0,
             input,
-            artifacts: ArtifactBag::new(),
+            state,
+            artifacts: Vec::new(),
             services,
         }
     }
@@ -261,88 +277,140 @@ impl WorkflowContext {
         })
     }
 
-    pub fn insert_artifact<T: Serialize>(
+    pub fn emit_artifact<T: Serialize>(
         &mut self,
         key: impl Into<String>,
         kind: impl Into<String>,
         value: &T,
     ) -> Result<(), RunError> {
-        self.artifacts.insert(key, kind, value)
+        let key = key.into();
+        let kind = kind.into();
+        let serialized = serde_json::to_value(value)
+            .map_err(|error| RunError::Artifact(format!("failed to serialize `{key}`: {error}")))?;
+        self.artifacts.push(ArtifactEnvelope {
+            key,
+            kind,
+            value: serialized,
+        });
+        Ok(())
     }
 
-    pub fn artifact<T: DeserializeOwned>(&self, key: &str) -> Result<T, RunError> {
-        self.artifacts.get(key)
+    pub fn state<T: 'static>(&self) -> Result<&T, RunError> {
+        self.state.get::<T>().ok_or_else(|| {
+            RunError::Artifact(format!(
+                "missing state of type `{}`",
+                std::any::type_name::<T>()
+            ))
+        })
+    }
+
+    pub fn state_mut<T: 'static>(&mut self) -> Result<&mut T, RunError> {
+        self.state.get_mut::<T>().ok_or_else(|| {
+            RunError::Artifact(format!(
+                "missing state of type `{}`",
+                std::any::type_name::<T>()
+            ))
+        })
+    }
+
+    pub fn insert_state<T: Send + Sync + 'static>(&mut self, value: T) {
+        self.state.insert(value);
     }
 }
 
 pub enum StepTransition {
-    Continue,
-    JumpTo(&'static str),
+    Next(&'static str),
     Complete {
-        output_artifact: Option<&'static str>,
+        output_artifact: Option<ArtifactEnvelope>,
         qualified: bool,
     },
 }
 
-pub struct StepExecution {
-    pub context: WorkflowContext,
-    pub transition: StepTransition,
+pub trait WorkflowStep: Send + Sync {
+    fn id(&self) -> &'static str;
+    fn execute<'a>(
+        &self,
+        context: &'a mut WorkflowContext,
+    ) -> BoxFuture<'a, Result<StepTransition, RunError>>;
 }
 
-impl StepExecution {
-    #[must_use]
-    pub fn continue_with(context: WorkflowContext) -> Self {
+#[derive(Debug, Clone)]
+pub struct RetryPolicy {
+    pub max_attempts: usize,
+    pub base_delay_ms: u64,
+}
+
+impl Default for RetryPolicy {
+    fn default() -> Self {
         Self {
-            context,
-            transition: StepTransition::Continue,
+            max_attempts: 1,
+            base_delay_ms: 1000,
         }
     }
 }
 
-pub trait WorkflowStep: Send + Sync {
-    fn id(&self) -> &'static str;
-    fn execute(
-        &self,
-        context: WorkflowContext,
-    ) -> BoxFuture<'static, Result<StepExecution, RunError>>;
+pub struct StepConfig {
+    pub step: Arc<dyn WorkflowStep>,
+    pub retry_policy: Option<RetryPolicy>,
+    pub fallback_step: Option<&'static str>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RetryPolicy {
-    pub gate_step: &'static str,
-    pub gate_artifact: &'static str,
-    pub retry_from_step: &'static str,
-    pub max_attempts: usize,
+impl StepConfig {
+    #[must_use]
+    pub fn new(step: Arc<dyn WorkflowStep>) -> Self {
+        Self {
+            step,
+            retry_policy: None,
+            fallback_step: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_retry(mut self, max_attempts: usize, base_delay_ms: u64) -> Self {
+        self.retry_policy = Some(RetryPolicy {
+            max_attempts,
+            base_delay_ms,
+        });
+        self
+    }
+
+    #[must_use]
+    pub fn with_fallback(mut self, fallback_step: &'static str) -> Self {
+        self.fallback_step = Some(fallback_step);
+        self
+    }
+
+    #[must_use]
+    pub fn id(&self) -> &'static str {
+        self.step.id()
+    }
+}
+
+impl From<Arc<dyn WorkflowStep>> for StepConfig {
+    fn from(step: Arc<dyn WorkflowStep>) -> Self {
+        Self::new(step)
+    }
 }
 
 pub struct WorkflowDefinition {
     pub workflow_id: &'static str,
-    pub steps: Vec<Arc<dyn WorkflowStep>>,
-    pub retry_policy: Option<RetryPolicy>,
-    pub default_output_artifact: Option<&'static str>,
+    pub initial_step: &'static str,
+    pub steps: HashMap<&'static str, StepConfig>,
 }
 
 impl WorkflowDefinition {
     #[must_use]
-    pub fn new(workflow_id: &'static str, steps: Vec<Arc<dyn WorkflowStep>>) -> Self {
+    pub fn new(
+        workflow_id: &'static str,
+        initial_step: &'static str,
+        steps: Vec<StepConfig>,
+    ) -> Self {
+        let steps_map = steps.into_iter().map(|s| (s.id(), s)).collect();
         Self {
             workflow_id,
-            steps,
-            retry_policy: None,
-            default_output_artifact: None,
+            initial_step,
+            steps: steps_map,
         }
-    }
-
-    #[must_use]
-    pub fn with_retry_policy(mut self, policy: RetryPolicy) -> Self {
-        self.retry_policy = Some(policy);
-        self
-    }
-
-    #[must_use]
-    pub fn with_default_output_artifact(mut self, key: &'static str) -> Self {
-        self.default_output_artifact = Some(key);
-        self
     }
 }
 

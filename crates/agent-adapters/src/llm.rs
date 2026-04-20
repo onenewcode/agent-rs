@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use agent_kernel::RunError;
 use rig::{client::CompletionClient, completion::Prompt, providers::openrouter};
+use tiktoken_rs::cl100k_base;
 use tracing::{info, warn};
 
 #[derive(Debug, Clone)]
@@ -27,9 +28,10 @@ const RETRYABLE_ERROR_PATTERNS: &[&str] = &[
     "deadline exceeded",
 ];
 
-pub struct OpenRouterModel<P: Prompt> {
-    agent: P,
+pub struct OpenRouterModel {
+    client: openrouter::Client,
     config: LlmProviderConfig,
+    system_prompt: String,
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -37,7 +39,7 @@ pub fn build_openrouter_model(
     http: reqwest::Client,
     config: LlmProviderConfig,
     system_prompt: String,
-) -> Result<OpenRouterModel<impl Prompt>, RunError> {
+) -> Result<OpenRouterModel, RunError> {
     let client = openrouter::Client::builder()
         .api_key(config.api_key.as_str())
         .http_client(http)
@@ -45,17 +47,34 @@ pub fn build_openrouter_model(
         .map_err(|error| {
             RunError::Provider(format!("failed to build OpenRouter client: {error}"))
         })?;
-    let agent = client.agent(&config.model).preamble(&system_prompt).build();
-    Ok(OpenRouterModel { agent, config })
+    Ok(OpenRouterModel { client, config, system_prompt })
 }
 
-impl<P: Prompt + Send + Sync> agent_kernel::LanguageModel for OpenRouterModel<P> {
-    fn complete(&self, prompt: &str) -> agent_kernel::BoxFuture<'_, Result<String, RunError>> {
+impl agent_kernel::LanguageModel for OpenRouterModel {
+    fn agent_builder(&self) -> rig::agent::AgentBuilder<rig::providers::openrouter::completion::CompletionModel> {
+        self.client.agent(&self.config.model).preamble(&self.system_prompt)
+    }
+
+    fn complete<'a>(&'a self, context: &'a mut agent_kernel::WorkflowContext, prompt: &str) -> agent_kernel::BoxFuture<'a, Result<String, RunError>> {
         let prompt = prompt.to_owned();
+        let agent = self.agent_builder().build();
         Box::pin(async move {
             for attempt in 1..=3 {
-                match self.agent.prompt(&prompt).await {
+                match agent.prompt(&prompt).await {
                     Ok(content) => {
+                        let prompt_tokens = estimate_tokens(&prompt);
+                        let completion_tokens = estimate_tokens(&content);
+
+                        if let Ok(telemetry) = context.state_mut::<agent_kernel::Telemetry>() {
+                            telemetry.usage.prompt_tokens += prompt_tokens;
+                            telemetry.usage.completion_tokens += completion_tokens;
+                            telemetry.usage.total_tokens += prompt_tokens + completion_tokens;
+
+                            let cost = (prompt_tokens as f64 * (self.config.input_cost_per_1m / 1_000_000.0))
+                                + (completion_tokens as f64 * (self.config.output_cost_per_1m / 1_000_000.0));
+                            telemetry.estimated_cost_usd += cost;
+                        }
+
                         log_telemetry(&self.config, &prompt, &content);
                         return Ok(content);
                     }
@@ -109,6 +128,10 @@ fn is_retryable_error(message: &str) -> bool {
     RETRYABLE_ERROR_PATTERNS
         .iter()
         .any(|pattern| lower.contains(pattern))
+}
+
+fn estimate_tokens(text: &str) -> usize {
+    cl100k_base().map(|bpe| bpe.encode_with_special_tokens(text).len()).unwrap_or(text.chars().count() / 4)
 }
 
 #[cfg(test)]

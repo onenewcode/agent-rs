@@ -5,7 +5,7 @@ members = [
     "crates/agent-kernel",
     "crates/agent-runtime",
     "crates/docx-domain",
-    "crates/agent-adapters",
+    "crates/agent-adapters", "crates/agent-tools",
 ]
 resolver = "2"
 

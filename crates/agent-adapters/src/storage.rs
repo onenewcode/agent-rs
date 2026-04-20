@@ -56,13 +56,15 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("agent-rs-artifacts-{millis}"));
         let store = JsonFileArtifactStore::new(&dir);
         let report = agent_kernel::RunReport {
-            run_id: "run-1".to_owned(),
-            workflow: "docx.expand".to_owned(),
+            run_id: "test-run".to_owned(),
+            workflow: "test-workflow".to_owned(),
             qualified: true,
             output_artifact: None,
             artifacts: Vec::new(),
             events: Vec::new(),
-            total_duration_ms: 1,
+            telemetry: agent_kernel::Telemetry::default(),
+            trajectory: agent_kernel::AgentTrajectory::default(),
+            total_duration_ms: 100,
         };
 
         store.persist(&report).await.expect("store should write");

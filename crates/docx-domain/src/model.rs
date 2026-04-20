@@ -94,6 +94,9 @@ pub struct DocxEvaluation {
     pub score: u8,
     pub reason: String,
     pub qualified: bool,
+    pub faithfulness_score: u8,
+    pub relevance_score: u8,
+    pub accuracy_score: u8,
 }
 
 impl From<DocxEvaluation> for QualityGate {
