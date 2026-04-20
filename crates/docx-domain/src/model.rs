@@ -1,7 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-use agent_kernel::{QualityGate, SourceMaterial};
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BlockKind {
     Heading { level: u8 },
@@ -61,28 +59,6 @@ pub struct DocxExpandRequest {
     pub source_policy: DocxSourcePolicy,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SearchMode {
-    Disabled,
-    Auto,
-    Required,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DocxPlan {
-    pub objective: String,
-    pub search_mode: SearchMode,
-    pub search_queries: Vec<String>,
-    pub evaluation_focus: String,
-    pub max_refinement_rounds: usize,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DocxResearchArtifacts {
-    pub queries: Vec<String>,
-    pub sources: Vec<SourceMaterial>,
-}
-
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DocxDraft {
     pub content: String,
@@ -97,16 +73,6 @@ pub struct DocxEvaluation {
     pub faithfulness_score: u8,
     pub relevance_score: u8,
     pub accuracy_score: u8,
-}
-
-impl From<DocxEvaluation> for QualityGate {
-    fn from(value: DocxEvaluation) -> Self {
-        Self {
-            score: value.score,
-            passed: value.qualified,
-            reason: value.reason,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

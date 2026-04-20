@@ -3,7 +3,7 @@ default_timeout_secs = 180
 capture_artifacts = true
 
 [services.http]
-user_agent = "agent-rs-docx-agent/0.3"
+user_agent = "agent-rs-docx-agent/0.2"
 fetch_timeout_secs = 20
 search_timeout_secs = 30
 
@@ -19,15 +19,11 @@ persist_reports = true
 provider = "openrouter"
 model = "minimax/minimax-m2.5:free"
 api_key = "replace-with-openrouter-api-key"
-input_cost_per_1m = 0.15
-output_cost_per_1m = 0.60
 
 [services.models.reviewer]
 provider = "openrouter"
 model = "qwen/qwen3-coder:free"
 api_key = "replace-with-openrouter-api-key"
-input_cost_per_1m = 0.0
-output_cost_per_1m = 0.0
 
 [services.search]
 provider = "tavily"
@@ -38,8 +34,7 @@ writer_model = "writer"
 reviewer_model = "reviewer"
 planner_model = "writer"
 min_score = 80
-max_refinement_rounds = 3
-refinement_max_turns = 10
+max_refinement_rounds = 2
 search_max_results = 5
 fetch_concurrency_limit = 5
 document_tokens = 4000

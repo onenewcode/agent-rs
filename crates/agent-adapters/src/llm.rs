@@ -1,7 +1,9 @@
 use std::time::Duration;
 
-use agent_kernel::RunError;
-use rig::{client::CompletionClient, completion::Prompt, providers::openrouter};
+use agent_kernel::{RunError, TokenUsage, LlmCompletion};
+use rig::client::CompletionClient;
+use rig::completion::Prompt;
+use rig::providers::openrouter;
 use tiktoken_rs::cl100k_base;
 use tracing::{info, warn};
 
@@ -55,7 +57,7 @@ impl agent_kernel::LanguageModel for OpenRouterModel {
         self.client.agent(&self.config.model).preamble(&self.system_prompt)
     }
 
-    fn complete<'a>(&'a self, context: &'a mut agent_kernel::WorkflowContext, prompt: &str) -> agent_kernel::BoxFuture<'a, Result<String, RunError>> {
+    fn complete(&self, prompt: &str) -> agent_kernel::BoxFuture<'_, Result<LlmCompletion, RunError>> {
         let prompt = prompt.to_owned();
         let agent = self.agent_builder().build();
         Box::pin(async move {
@@ -64,23 +66,25 @@ impl agent_kernel::LanguageModel for OpenRouterModel {
                     Ok(content) => {
                         let prompt_tokens = estimate_tokens(&prompt);
                         let completion_tokens = estimate_tokens(&content);
+                        let usage = TokenUsage {
+                            prompt_tokens,
+                            completion_tokens,
+                            total_tokens: prompt_tokens + completion_tokens,
+                        };
 
-                        if let Ok(telemetry) = context.state_mut::<agent_kernel::Telemetry>() {
-                            telemetry.usage.prompt_tokens += prompt_tokens;
-                            telemetry.usage.completion_tokens += completion_tokens;
-                            telemetry.usage.total_tokens += prompt_tokens + completion_tokens;
+                        #[allow(clippy::cast_precision_loss)]
+                        let estimated_cost_usd = (prompt_tokens as f64 * (self.config.input_cost_per_1m / 1_000_000.0))
+                            + (completion_tokens as f64 * (self.config.output_cost_per_1m / 1_000_000.0));
 
-                            let cost = (prompt_tokens as f64 * (self.config.input_cost_per_1m / 1_000_000.0))
-                                + (completion_tokens as f64 * (self.config.output_cost_per_1m / 1_000_000.0));
-                            telemetry.estimated_cost_usd += cost;
-                        }
-
-                        log_telemetry(&self.config, &prompt, &content);
-                        return Ok(content);
+                        log_telemetry(&self.config, prompt_tokens, completion_tokens);
+                        return Ok(LlmCompletion {
+                            text: content,
+                            usage,
+                            estimated_cost_usd,
+                        });
                     }
                     Err(error) => {
                         let message = error.to_string();
-                        // Clean extra blank lines in error message (often seen in 524 errors)
                         let cleaned_message = if message.contains("\n\n\n") {
                             message.lines()
                                 .filter(|line| !line.trim().is_empty())
@@ -91,8 +95,7 @@ impl agent_kernel::LanguageModel for OpenRouterModel {
                         };
 
                         if is_retryable_error(&cleaned_message) && attempt < 3 {
-                            let delay =
-                                Duration::from_secs(u64::try_from(attempt).unwrap_or(1) * 2);
+                            let delay = Duration::from_secs(u64::try_from(attempt).unwrap_or(1) * 2);
                             warn!(
                                 model = %self.config.model,
                                 attempt,
@@ -116,18 +119,15 @@ impl agent_kernel::LanguageModel for OpenRouterModel {
     }
 }
 
-fn log_telemetry(config: &LlmProviderConfig, input: &str, output: &str) {
-    let input_units = input.chars().count();
-    let output_units = output.chars().count();
-
+fn log_telemetry(config: &LlmProviderConfig, prompt_tokens: usize, completion_tokens: usize) {
     #[allow(clippy::cast_precision_loss)]
-    let total_cost = (input_units as f64 * (config.input_cost_per_1m / 1_000_000.0))
-        + (output_units as f64 * (config.output_cost_per_1m / 1_000_000.0));
+    let total_cost = (prompt_tokens as f64 * (config.input_cost_per_1m / 1_000_000.0))
+        + (completion_tokens as f64 * (config.output_cost_per_1m / 1_000_000.0));
 
     info!(
         model = %config.model,
-        input_units,
-        output_units,
+        prompt_tokens,
+        completion_tokens,
         cost_usd = %format!("{total_cost:.6}"),
         "LLM request completed"
     );
@@ -141,7 +141,9 @@ fn is_retryable_error(message: &str) -> bool {
 }
 
 fn estimate_tokens(text: &str) -> usize {
-    cl100k_base().map(|bpe| bpe.encode_with_special_tokens(text).len()).unwrap_or(text.chars().count() / 4)
+    cl100k_base().map_or(text.chars().count() / 4, |bpe| {
+        bpe.encode_with_special_tokens(text).len()
+    })
 }
 
 #[cfg(test)]

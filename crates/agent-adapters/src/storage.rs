@@ -18,7 +18,7 @@ impl JsonFileArtifactStore {
 impl ArtifactStore for JsonFileArtifactStore {
     fn persist(&self, report: &RunReport) -> agent_kernel::BoxFuture<'_, Result<(), RunError>> {
         let dir = self.dir.clone();
-        let filename = format!("{}-{}.json", report.workflow, report.run_id);
+        let filename = format!("{}-{}.json", report.agent_role, report.run_id);
         let payload = serde_json::to_vec_pretty(report).map_err(|error| {
             RunError::Internal(format!("failed to serialize run report for persistence: {error}"))
         });
@@ -57,11 +57,10 @@ mod tests {
         let store = JsonFileArtifactStore::new(&dir);
         let report = agent_kernel::RunReport {
             run_id: "test-run".to_owned(),
-            workflow: "test-workflow".to_owned(),
+            agent_role: "test-role".to_owned(),
             qualified: true,
             output_artifact: None,
             artifacts: Vec::new(),
-            events: Vec::new(),
             telemetry: agent_kernel::Telemetry::default(),
             trajectory: agent_kernel::AgentTrajectory::default(),
             total_duration_ms: 100,

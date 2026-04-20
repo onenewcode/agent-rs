@@ -1,16 +1,17 @@
 #![allow(clippy::missing_errors_doc)]
-
+pub mod agents;
 mod model;
 mod parser;
 mod prompts;
-mod workflow;
 
 pub use model::{
     BlockKind, Document, DocumentBlock, DocxAttemptRecord, DocxDraft, DocxEvaluation,
-    DocxExpandRequest, DocxFinalOutput, DocxPlan, DocxResearchArtifacts, DocxSourcePolicy,
+    DocxExpandRequest, DocxFinalOutput, DocxSourcePolicy,
 };
+
+pub use agents::reviewer::ReviewerAgent;
+pub use agents::writer::WriterAgent;
 pub use parser::DocxDocumentParser;
 pub use prompts::{
     DocxPromptContext, DocxPromptFormatter, DocxPromptTemplates, TokenBudget, count_tokens,
 };
-pub use workflow::{DocxWorkflow, DocxWorkflowConfig};

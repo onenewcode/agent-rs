@@ -1,5 +1,6 @@
-use rig::tool::Tool;
+use agent_kernel::AgentTrajectory;
 use rig::completion::ToolDefinition;
+use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
@@ -8,7 +9,7 @@ use tracing::info;
 /// Tool to edit a document by replacing old text with new text.
 pub struct EditDocumentTool {
     pub current_content: Arc<tokio::sync::RwLock<String>>,
-    pub trajectory: Arc<tokio::sync::Mutex<agent_kernel::AgentTrajectory>>,
+    pub trajectory: Arc<tokio::sync::Mutex<AgentTrajectory>>,
 }
 
 #[derive(Deserialize, Serialize, Clone)]
@@ -51,13 +52,16 @@ impl Tool for EditDocumentTool {
             *content = content.replace(&args.old_text, &args.new_text);
             "Successfully updated document.".to_string()
         } else {
-            format!("Error: Could not find exact text '{}' in document.", args.old_text)
+            format!(
+                "Error: Could not find exact text '{}' in document.",
+                args.old_text
+            )
         };
 
         let mut traj = self.trajectory.lock().await;
         traj.steps.push(agent_kernel::TrajectoryStep::Action {
             tool: Self::NAME.to_string(),
-            input: serde_json::to_value(&args).unwrap_or_default(),
+            input: serde_json::to_value(&args).map_err(|e| ToolError(e.to_string()))?,
             output: result.clone(),
         });
 
@@ -68,7 +72,7 @@ impl Tool for EditDocumentTool {
 /// Tool to perform a web search for missing information.
 pub struct WebSearchTool {
     pub provider: Arc<dyn agent_kernel::SearchProvider>,
-    pub trajectory: Arc<tokio::sync::Mutex<agent_kernel::AgentTrajectory>>,
+    pub trajectory: Arc<tokio::sync::Mutex<AgentTrajectory>>,
 }
 
 #[derive(Deserialize, Serialize, Clone)]
@@ -86,7 +90,9 @@ impl Tool for WebSearchTool {
     async fn definition(&self, _prompt: String) -> ToolDefinition {
         ToolDefinition {
             name: Self::NAME.to_string(),
-            description: "Searches the web for specific information or facts to improve the document.".to_string(),
+            description:
+                "Searches the web for specific information or facts to improve the document."
+                    .to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -100,21 +106,25 @@ impl Tool for WebSearchTool {
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
         info!(query = %args.query, "WebSearchTool: searching");
         let result = match self.provider.search(&args.query, 3).await {
-            Ok(results) => {
-                results
-                    .into_iter()
-                    .map(|r| format!("Title: {}\nURL: {}\nContent: {}\n", 
-                        r.title.unwrap_or_default(), r.url, r.content))
-                    .collect::<Vec<_>>()
-                    .join("\n---\n")
-            }
-            Err(e) => format!("Search failed: {}", e),
+            Ok(results) => results
+                .into_iter()
+                .map(|r| {
+                    format!(
+                        "Title: {}\nURL: {}\nContent: {}\n",
+                        r.title.unwrap_or_default(),
+                        r.url,
+                        r.content
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n---\n"),
+            Err(e) => format!("Search failed: {e}"),
         };
 
         let mut traj = self.trajectory.lock().await;
         traj.steps.push(agent_kernel::TrajectoryStep::Action {
             tool: Self::NAME.to_string(),
-            input: serde_json::to_value(&args).unwrap_or_default(),
+            input: serde_json::to_value(&args).map_err(|e| ToolError(e.to_string()))?,
             output: result.clone(),
         });
 
