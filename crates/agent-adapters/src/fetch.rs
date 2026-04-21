@@ -1,6 +1,6 @@
 use agent_kernel::{
-    Error, ErrorSource, ErrorType, OrErr, Result, RetryType, SourceFetcher, SourceKind,
-    SourceMaterial, truncate_chars,
+    Error, ErrorSource, ErrorType, Result, RetryType, SourceFetcher, SourceKind, SourceMaterial,
+    truncate_chars,
 };
 use std::sync::Arc;
 
@@ -15,40 +15,65 @@ impl ReqwestFetcher {
     }
 
     async fn fetch_url(&self, url: &str) -> Result<SourceMaterial> {
+        let jina_url = format!("https://r.jina.ai/{}", url);
+
         let response = tokio::time::timeout(
-            std::time::Duration::from_secs(30),
-            self.client.get(url).send(),
+            std::time::Duration::from_secs(45), // Increased timeout for Jina
+            self.client.get(&jina_url).send(),
         )
         .await
         .map_err(|_| {
             Box::new(Error::explain(
                 ErrorType::Timeout,
-                format!("fetching {url} timed out"),
+                format!("fetching {url} via Jina timed out"),
             ))
-        })?
-        .or_err(ErrorType::Network, &format!("failed to fetch {url}"))?;
+        })?;
 
+        // If the request itself failed (e.g. DNS), we still return Err
+        let response = match response {
+            Ok(resp) => resp,
+            Err(e) => {
+                return Err(Box::new(Error::because(
+                    e,
+                    ErrorType::Network,
+                    format!("failed to send request to Jina for {url}"),
+                )));
+            }
+        };
+
+        // If the status is not success (e.g. 404), we return a GENTLE error message in the content
+        // instead of a Rust Err. This allows the LLM to recover from its own hallucinations.
         if !response.status().is_success() {
             let status = response.status();
-            let mut err = Error::explain(
-                ErrorType::Network,
-                format!("failed to fetch {url}: HTTP {status}"),
-            );
-            if status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-                err = err.set_retry(RetryType::Retry);
-            }
-            return Err(Box::new(err.set_source(ErrorSource::Upstream)));
+            return Ok(SourceMaterial {
+                title: Some(format!("Error: {}", status)),
+                url: url.to_owned(),
+                content: format!(
+                    "FAILED to access the URL {}. HTTP Status: {}. \
+                    This URL might be invalid or the site might be blocking scrapers. \
+                    Please use another URL or rely on your search summaries.",
+                    url, status
+                ),
+                kind: SourceKind::UserUrl,
+                summary: None,
+            });
         }
 
-        let content = response.text().await.or_err(
-            ErrorType::Network,
-            &format!("failed to read response text from {url}"),
-        )?;
+        let content = match response.text().await {
+            Ok(text) => text,
+            Err(e) => {
+                return Err(Box::new(Error::because(
+                    e,
+                    ErrorType::Network,
+                    format!("failed to read Jina response body for {url}"),
+                )));
+            }
+        };
 
         Ok(SourceMaterial {
             title: Some(url.to_owned()),
             url: url.to_owned(),
-            content: truncate_chars(&content, 10000),
+            content: truncate_chars(&content, 15000), // Clean Markdown from Jina
             kind: SourceKind::UserUrl,
             summary: None,
         })
