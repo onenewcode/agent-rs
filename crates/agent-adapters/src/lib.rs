@@ -1,9 +1,7 @@
-#![allow(clippy::missing_errors_doc)]
+pub mod fetch;
+pub mod llm;
+pub mod search;
 
-mod fetch;
-mod llm;
-mod search;
-
-pub use fetch::WebPageSourceFetcher;
-pub use llm::{LlmProviderConfig, OpenRouterModel, build_openrouter_model};
+pub use fetch::ReqwestFetcher;
+pub use llm::OpenRouterModel;
 pub use search::TavilySearchProvider;

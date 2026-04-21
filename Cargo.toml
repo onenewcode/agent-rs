@@ -6,6 +6,7 @@ members = [
     "crates/agent-runtime",
     "crates/docx-domain",
     "crates/agent-adapters", "crates/agent-tools",
+    "crates/agent-error",
 ]
 resolver = "2"
 
@@ -30,6 +31,7 @@ tiktoken-rs = "0.6"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "fs"] }
 toml = "0.8"
 tracing = "0.1"
+agent-error = { path = "crates/agent-error" }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 zip = { version = "8", default-features = false, features = ["deflate"] }
 

@@ -5,6 +5,7 @@ edition.workspace = true
 
 
 [dependencies]
+agent-error.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 agent-app = { path = "../../crates/agent-app" }

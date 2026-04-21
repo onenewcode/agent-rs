@@ -14,6 +14,14 @@ pub struct Telemetry {
     pub estimated_cost_usd: f64,
 }
 
+impl Telemetry {
+    pub fn add_usage(&mut self, _model_id: &str, usage: TokenUsage) {
+        self.usage.prompt_tokens += usage.prompt_tokens;
+        self.usage.completion_tokens += usage.completion_tokens;
+        self.usage.total_tokens += usage.total_tokens;
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TrajectoryStep {
     Thought(String),

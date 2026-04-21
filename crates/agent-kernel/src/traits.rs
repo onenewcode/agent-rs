@@ -1,4 +1,4 @@
-use crate::error::RunError;
+use crate::error::Result;
 use crate::telemetry::TokenUsage;
 use std::future::Future;
 use std::path::Path;
@@ -7,7 +7,7 @@ use std::pin::Pin;
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 pub trait DocumentParser<T>: Send + Sync {
-    fn parse_path(&self, path: &Path) -> Result<T, RunError>;
+    fn parse_path(&self, path: &Path) -> Result<T>;
 }
 
 pub struct LlmCompletion {
@@ -21,7 +21,7 @@ pub trait LanguageModel: Send + Sync {
     fn model_id(&self) -> &str;
 
     /// Completes the prompt and returns the text, token usage, and cost.
-    fn complete(&self, prompt: &str) -> BoxFuture<'_, Result<LlmCompletion, RunError>>;
+    fn complete(&self, prompt: &str) -> BoxFuture<'_, Result<LlmCompletion>>;
 
     /// Returns a rig `AgentBuilder` pre-configured with the model and system prompt.
     fn agent_builder(
@@ -34,11 +34,11 @@ pub trait AutonomousAgent: Send + Sync {
     fn run<'a>(
         &'a self,
         session: &'a crate::agent::AgentSession,
-    ) -> BoxFuture<'a, Result<(), RunError>>;
+    ) -> BoxFuture<'a, Result<()>>;
 }
 
 pub trait SourceFetcher: Send + Sync {
-    fn fetch(&self, url: &str) -> BoxFuture<'_, Result<crate::SourceMaterial, RunError>>;
+    fn fetch(&self, url: &str) -> BoxFuture<'_, Result<crate::SourceMaterial>>;
 }
 
 pub trait SearchProvider: Send + Sync {
@@ -46,9 +46,9 @@ pub trait SearchProvider: Send + Sync {
         &self,
         query: &str,
         max_results: usize,
-    ) -> BoxFuture<'_, Result<Vec<crate::SourceMaterial>, RunError>>;
+    ) -> BoxFuture<'_, Result<Vec<crate::SourceMaterial>>>;
 }
 
 pub trait ArtifactStore: Send + Sync {
-    fn persist(&self, report: &crate::artifact::RunReport) -> BoxFuture<'_, Result<(), RunError>>;
+    fn persist(&self, report: &crate::artifact::RunReport) -> BoxFuture<'_, Result<()>>;
 }

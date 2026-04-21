@@ -1,15 +1,12 @@
 #![allow(clippy::missing_errors_doc)]
 pub mod agents;
+pub mod parser;
 mod model;
-mod parser;
 mod prompts;
 
-pub use model::{
-    BlockKind, Document, DocumentBlock,
-    DocxExpandRequest, DocxSourcePolicy,
-};
+pub use model::{Document, DocxExpandRequest, DocxSourcePolicy};
 
-pub use agents::reviewer::ReviewerAgent;
-pub use agents::writer::WriterAgent;
-pub use parser::DocxDocumentParser;
+pub use agents::reviewer::DocumentReviewer;
+pub use agents::writer::DocumentWriter;
+pub use parser::DocxParser;
 pub use prompts::count_tokens;

@@ -1,151 +1,91 @@
-#![allow(clippy::missing_errors_doc)]
-
-use std::{fs, path::Path, sync::Arc};
-
-use agent_adapters::{LlmProviderConfig, TavilySearchProvider, build_openrouter_model};
-use agent_kernel::{DocumentParser, LanguageModel, RunError, RunReport, SearchProvider};
+use agent_adapters::{OpenRouterModel, ReqwestFetcher, TavilySearchProvider};
+use agent_kernel::{
+    DocumentParser, Result, Error, ErrorType, RunReport, SearchProvider, SourceFetcher, OrErr,
+};
 use agent_runtime::AgentOrchestrator;
-use docx_domain::{DocxDocumentParser, DocxExpandRequest, ReviewerAgent, WriterAgent};
-use serde::Deserialize;
+use docx_domain::{Document, DocxParser, DocumentReviewer, DocumentWriter};
+use serde::{Deserialize, Serialize};
+use std::path::Path;
+use std::sync::Arc;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct AppConfig {
-    pub runtime: RuntimeConfig,
-    pub services: ServiceConfig,
-    pub docx_expand: DocxWorkflowFileConfig,
+    pub openrouter_api_key: String,
+    pub tavily_api_key: Option<String>,
+    pub writer_model: String,
+    pub reviewer_model: String,
+    pub max_iterations: usize,
 }
 
 impl AppConfig {
-    pub fn from_path(path: &Path) -> Result<Self, RunError> {
-        let content = fs::read_to_string(path)
-            .map_err(|error| RunError::Config(format!("failed to read config: {error}")))?;
-        toml::from_str::<Self>(&content)
-            .map_err(|error| RunError::Config(format!("failed to parse config: {error}")))
+    pub fn from_path(path: &Path) -> Result<Self> {
+        let content = std::fs::read_to_string(path)
+            .or_err(ErrorType::Config, "failed to read config file")?;
+        toml::from_str(&content)
+            .or_err(ErrorType::Config, "failed to parse config as TOML")
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct RuntimeConfig {
-    pub default_timeout_secs: u64,
-    pub max_iterations: usize,
-    pub retry_attempts: Option<usize>,
+pub struct AppContainer {
+    pub orchestrator: AgentOrchestrator,
+    pub parser: DocxParser,
+    pub fetcher: Arc<dyn SourceFetcher>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct ServiceConfig {
-    pub http: HttpConfig,
-    pub cache: CacheConfig,
-    pub models: std::collections::BTreeMap<String, ModelConfig>,
-    pub search: Option<SearchConfig>,
-}
+impl AppContainer {
+    pub fn from_config(config: &AppConfig) -> Result<Self> {
+        let http_client = Arc::new(
+            reqwest::Client::builder()
+                .build()
+                .or_err(ErrorType::Config, "failed to build HTTP client")?,
+        );
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct HttpConfig {
-    pub user_agent: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct CacheConfig {
-    pub dir: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct ModelConfig {
-    pub model: String,
-    pub api_key: String,
-    pub input_cost_per_1m: f64,
-    pub output_cost_per_1m: f64,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct SearchConfig {
-    pub api_key: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct DocxWorkflowFileConfig {
-    pub writer_model: String,
-    pub reviewer_model: String,
-    pub min_score: u8,
-    pub document_tokens: usize,
-    pub source_tokens: usize,
-    pub max_total_tokens: usize,
-}
-
-pub struct PlatformApp {
-    orchestrator: AgentOrchestrator,
-}
-
-impl PlatformApp {
-    pub fn from_config(config: &AppConfig) -> Result<Self, RunError> {
-        let http = reqwest::Client::builder()
-            .user_agent(&config.services.http.user_agent)
-            .build()
-            .map_err(|error| RunError::Config(format!("failed to build http client: {error}")))?;
-
-        let mut llms = std::collections::BTreeMap::new();
-        for (alias, model) in &config.services.models {
-            let llm = build_openrouter_model(
-                http.clone(),
-                LlmProviderConfig {
-                    model: model.model.clone(),
-                    api_key: model.api_key.clone(),
-                    input_cost_per_1m: model.input_cost_per_1m,
-                    output_cost_per_1m: model.output_cost_per_1m,
-                },
-                "You are an autonomous expert AI assistant.".to_owned(),
-            )?;
-            llms.insert(alias.clone(), Arc::new(llm) as Arc<dyn LanguageModel>);
-        }
-
-        let writer_llm = llms
-            .get(&config.docx_expand.writer_model)
-            .cloned()
-            .ok_or_else(|| RunError::Config("writer_model not found".to_owned()))?;
-        let reviewer_llm = llms
-            .get(&config.docx_expand.reviewer_model)
-            .cloned()
-            .ok_or_else(|| RunError::Config("reviewer_model not found".to_owned()))?;
-
-        let search_provider = config.services.search.as_ref().map(|s| {
-            Arc::new(TavilySearchProvider::new(
-                http.clone(),
-                &s.api_key,
-                8000,
-                30,
-            )) as Arc<dyn SearchProvider>
-        });
-
-        let writer = Arc::new(WriterAgent::new(writer_llm, search_provider));
-        let reviewer = Arc::new(ReviewerAgent::new(
-            reviewer_llm,
-            config.docx_expand.min_score,
+        let writer_model = Arc::new(OpenRouterModel::new(
+            config.writer_model.clone(),
+            config.openrouter_api_key.clone(),
         ));
 
-        let mut orchestrator = AgentOrchestrator::new(writer, reviewer, config.runtime.max_iterations);
+        let reviewer_model = Arc::new(OpenRouterModel::new(
+            config.reviewer_model.clone(),
+            config.openrouter_api_key.clone(),
+        ));
 
-        if let Some(attempts) = config.runtime.retry_attempts {
-            orchestrator = orchestrator.with_retry_policy(agent_runtime::RetryPolicy {
-                max_attempts: attempts,
-                base_delay_ms: 2000,
-            });
-        }
+        let search_provider: Arc<dyn SearchProvider> = if let Some(key) = &config.tavily_api_key {
+            Arc::new(TavilySearchProvider::new(key.clone(), http_client.clone()))
+        } else {
+            return Err(Box::new(Error::explain(
+                ErrorType::Config,
+                "Tavily API key is required for search".to_owned(),
+            )));
+        };
 
-        Ok(Self { orchestrator })
+        let writer = Arc::new(DocumentWriter::new(
+            writer_model.clone(),
+            search_provider.clone(),
+        ));
+        let reviewer = Arc::new(DocumentReviewer::new(reviewer_model.clone()));
+
+        let orchestrator =
+            AgentOrchestrator::new(writer, reviewer, config.max_iterations);
+        let parser = DocxParser::new();
+        let fetcher = Arc::new(ReqwestFetcher::new(http_client.clone()));
+
+        Ok(Self {
+            orchestrator,
+            parser,
+            fetcher,
+        })
     }
 
-    pub fn from_path(path: &Path) -> Result<Self, RunError> {
-        Self::from_config(&AppConfig::from_path(path)?)
+    pub fn parse_doc(&self, path: &Path) -> Result<Document> {
+        self.parser.parse_path(path)
     }
 
-    pub async fn run_docx(
+    pub async fn run_expansion(
         &self,
-        request: DocxExpandRequest,
-    ) -> Result<(RunReport, String), RunError> {
-        let parser = DocxDocumentParser;
-        let document = parser.parse_path(Path::new(&request.document_path))?;
-        self.orchestrator
-            .run(request.prompt, document.render_markdown())
-            .await
+        task_goal: String,
+        initial_doc: String,
+    ) -> Result<(RunReport, String)> {
+        self.orchestrator.run(task_goal, initial_doc).await
     }
 }

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 use agent_kernel::{
-    AgentContext, AgentSession, AgentTrajectory, AutonomousAgent, RunError, RunReport,
+    AgentContext, AgentSession, AgentTrajectory, AutonomousAgent, Result, Error, ErrorType, ErrorSource, RetryType, RunReport,
     Telemetry,
 };
 use crate::generate_run_id;
@@ -39,7 +39,7 @@ impl AgentOrchestrator {
         &self,
         task_goal: String,
         initial_doc: String,
-    ) -> Result<(RunReport, String), RunError> {
+    ) -> Result<(RunReport, String)> {
         let start_time = std::time::Instant::now();
         let session_id = generate_run_id("mas.expansion");
         let context = Arc::new(RwLock::new(AgentContext::new(task_goal, initial_doc)));
@@ -61,12 +61,14 @@ impl AgentOrchestrator {
                 &format!("Writer turn (iteration {iteration})"),
                 &self.retry_policy,
                 || self.writer.run(&session),
-                agent_kernel::RunError::is_retryable,
+                |e| e.is_retryable(),
             )
             .await
             .map_err(|e| {
                 tracing::error!(agent = self.writer.role(), iteration, error = %e, "Writer agent failed critically");
-                RunError::Provider(format!("{} agent failed: {}", self.writer.role(), e))
+                Box::new(Error::explain(ErrorType::Provider, format!("{} agent failed: {}", self.writer.role(), e))
+                    .set_source(ErrorSource::Internal)
+                    .set_retry(RetryType::Fatal))
             })?;
 
             tracing::info!(iteration, "Starting Reviewer turn");
@@ -75,12 +77,14 @@ impl AgentOrchestrator {
                 &format!("Reviewer turn (iteration {iteration})"),
                 &self.retry_policy,
                 || self.reviewer.run(&session),
-                agent_kernel::RunError::is_retryable,
+                |e| e.is_retryable(),
             )
             .await
             .map_err(|e| {
                 tracing::error!(agent = self.reviewer.role(), iteration, error = %e, "Reviewer agent failed critically");
-                RunError::Provider(format!("{} agent failed: {}", self.reviewer.role(), e))
+                Box::new(Error::explain(ErrorType::Provider, format!("{} agent failed: {}", self.reviewer.role(), e))
+                    .set_source(ErrorSource::Internal)
+                    .set_retry(RetryType::Fatal))
             })?;
 
             let ctx = context.read().await;

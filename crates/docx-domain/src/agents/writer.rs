@@ -1,88 +1,51 @@
 use agent_kernel::{
-    AgentSession, AutonomousAgent, BoxFuture, LanguageModel, RunError, SearchProvider,
+    AgentSession, AutonomousAgent, BoxFuture, LanguageModel, Result, Error, ErrorType, ErrorSource, RetryType, SearchProvider,
 };
-use rig::completion::Prompt;
 use std::sync::Arc;
 
-pub struct WriterAgent {
+pub struct DocumentWriter {
     llm: Arc<dyn LanguageModel>,
-    search_provider: Option<Arc<dyn SearchProvider>>,
+    search: Arc<dyn SearchProvider>,
 }
 
-impl WriterAgent {
-    pub fn new(
-        llm: Arc<dyn LanguageModel>,
-        search_provider: Option<Arc<dyn SearchProvider>>,
-    ) -> Self {
-        Self {
-            llm,
-            search_provider,
-        }
+impl DocumentWriter {
+    #[must_use]
+    pub fn new(llm: Arc<dyn LanguageModel>, search: Arc<dyn SearchProvider>) -> Self {
+        Self { llm, search }
     }
 }
 
-impl AutonomousAgent for WriterAgent {
+impl AutonomousAgent for DocumentWriter {
     fn role(&self) -> &'static str {
         "Writer"
     }
 
-    fn run<'a>(&'a self, session: &'a AgentSession) -> BoxFuture<'a, Result<(), RunError>> {
-        let llm = self.llm.clone();
-        let search = self.search_provider.clone();
-
+    fn run<'a>(&'a self, session: &'a AgentSession) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            let context = session.context.write().await;
-
-            // Build the agent with tools
-            let content_wrapper =
-                Arc::new(tokio::sync::RwLock::new(context.current_document.clone()));
-            let edit_tool = agent_tools::EditDocumentTool {
-                current_content: Arc::clone(&content_wrapper),
-                trajectory: Arc::clone(&session.trajectory),
-            };
-
-            let mut builder = llm.agent_builder().tool(edit_tool);
-
-            if let Some(s) = search {
-                builder = builder.tool(agent_tools::WebSearchTool {
-                    provider: s,
-                    trajectory: Arc::clone(&session.trajectory),
-                });
-            }
-
-            let agent = builder.default_max_turns(10).build();
-
-            // Construct prompt for the writer using the new templates
-            let latest_feedback = context.feedback_history.last();
-            let prompt = if let Some(feedback) = latest_feedback {
-                crate::prompts::WriterTemplates::refinement_task(
-                    &context.task_goal,
-                    &context.current_document,
-                    feedback,
-                )
-            } else {
-                crate::prompts::WriterTemplates::initial_task(
-                    &context.task_goal,
-                    &context.current_document,
-                )
-            };
-
-            tracing::info!(role = "Writer", model = self.llm.model_id(), "Executing autonomous turn with tools");
-            // Release context lock before long-running agent prompt to allow other agents to read if needed
-            // (though in this loop it's sequential, it's good practice)
+            let context = session.context.read().await;
+            let prompt = format!(
+                "Goal: {}\n\nCurrent Document: {}\n\nSearch Results: {:?}\n\nFeedback: {:?}\n\nImprove the document.",
+                context.task_goal,
+                context.current_document,
+                context.search_results,
+                context.feedback_history
+            );
             drop(context);
 
-            let _response = agent
-                .prompt(&prompt)
-                .await
-                .map_err(|e| {
-                    RunError::Provider(format!("{} (model: {})", e, self.llm.model_id()))
-                })?;
+            let completion = self.llm.complete(&prompt).await.map_err(|e| {
+                Box::new(Error::explain(
+                    ErrorType::Provider,
+                    format!("{} (model: {})", e, self.llm.model_id()),
+                )
+                .set_source(ErrorSource::Upstream)
+                .set_retry(RetryType::Retry))
+            })?;
 
-            // Update document in context
-            let updated_content = content_wrapper.read().await.clone();
             let mut context = session.context.write().await;
-            context.current_document = updated_content;
+            context.current_document = completion.text;
+
+            let mut telemetry = session.telemetry.lock().await;
+            telemetry.add_usage(self.llm.model_id(), completion.usage);
 
             Ok(())
         })

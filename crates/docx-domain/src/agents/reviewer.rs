@@ -1,77 +1,57 @@
 use agent_kernel::{
-    AgentFeedback, AgentSession, AutonomousAgent, BoxFuture, LanguageModel, RunError,
+    AgentFeedback, AgentSession, AutonomousAgent, BoxFuture, LanguageModel, Result, Error, ErrorType, ErrorSource, RetryType,
 };
-use serde::Deserialize;
 use std::sync::Arc;
 
-pub struct ReviewerAgent {
+pub struct DocumentReviewer {
     llm: Arc<dyn LanguageModel>,
-    min_score: u8,
 }
 
-impl ReviewerAgent {
-    pub fn new(llm: Arc<dyn LanguageModel>, min_score: u8) -> Self {
-        Self { llm, min_score }
+impl DocumentReviewer {
+    #[must_use]
+    pub fn new(llm: Arc<dyn LanguageModel>) -> Self {
+        Self { llm }
     }
 }
 
-#[derive(Deserialize)]
-struct EvaluationPayload {
-    score: u8,
-    passed: bool,
-    suggestions: Vec<String>,
-    critical_errors: Vec<String>,
-}
-
-impl AutonomousAgent for ReviewerAgent {
+impl AutonomousAgent for DocumentReviewer {
     fn role(&self) -> &'static str {
         "Reviewer"
     }
 
-    fn run<'a>(&'a self, session: &'a AgentSession) -> BoxFuture<'a, Result<(), RunError>> {
-        let llm = self.llm.clone();
-        let min_score = self.min_score;
-
+    fn run<'a>(&'a self, session: &'a AgentSession) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
             let context = session.context.read().await;
-
-            let prompt = crate::prompts::ReviewerTemplates::evaluation_task(
-                &context.task_goal,
-                &context.current_document,
+            let prompt = format!(
+                "Review the following document based on the goal: {}\n\nDocument: {}\n\nProvide feedback in JSON format: {{\"score\": 0-10, \"passed\": bool, \"suggestions\": [], \"critical_errors\": []}}",
+                context.task_goal,
+                context.current_document
             );
+            drop(context);
 
-            tracing::info!(role = "Reviewer", model = self.llm.model_id(), "Starting evaluation");
-            let completion = llm.complete(&prompt).await.map_err(|e| {
-                RunError::Provider(format!("{} (model: {})", e, self.llm.model_id()))
+            let completion = self.llm.complete(&prompt).await.map_err(|e| {
+                Box::new(Error::explain(
+                    ErrorType::Provider,
+                    format!("{} (model: {})", e, self.llm.model_id()),
+                )
+                .set_source(ErrorSource::Upstream)
+                .set_retry(RetryType::Retry))
             })?;
 
-            let payload: EvaluationPayload =
-                parse_json_response(&completion.text).map_err(|e| {
-                    RunError::Evaluation(format!("failed to parse reviewer response: {e}"))
-                })?;
+            let feedback: AgentFeedback = serde_json::from_str(&completion.text).map_err(|e| {
+                Box::new(Error::explain(
+                    ErrorType::Evaluation,
+                    format!("failed to parse reviewer response: {e}"),
+                ))
+            })?;
 
-            let feedback = AgentFeedback {
-                score: payload.score,
-                passed: payload.passed && payload.score >= min_score,
-                suggestions: payload.suggestions,
-                critical_errors: payload.critical_errors,
-            };
-
-            drop(context);
             let mut context = session.context.write().await;
             context.feedback_history.push(feedback);
+
+            let mut telemetry = session.telemetry.lock().await;
+            telemetry.add_usage(self.llm.model_id(), completion.usage);
 
             Ok(())
         })
     }
-}
-
-fn parse_json_response(text: &str) -> Result<EvaluationPayload, serde_json::Error> {
-    let trimmed = text.trim();
-    let json = if let (Some(start), Some(end)) = (trimmed.find('{'), trimmed.rfind('}')) {
-        &trimmed[start..=end]
-    } else {
-        trimmed
-    };
-    serde_json::from_str(json)
 }

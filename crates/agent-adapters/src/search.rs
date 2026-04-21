@@ -1,91 +1,93 @@
-use std::time::Duration;
-
-use agent_kernel::{RunError, SearchProvider, SourceKind, SourceMaterial, truncate_chars};
+use agent_kernel::{
+    Error, ErrorSource, ErrorType, Result, SearchProvider, SourceKind, SourceMaterial,
+    truncate_chars, OrErr, RetryType,
+};
 use serde::{Deserialize, Serialize};
-use tokio::time::timeout;
-use tracing::{debug, info, warn};
+use serde_json::json;
+use std::sync::Arc;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Deserialize, Serialize)]
+struct TavilySearchResponse {
+    results: Vec<TavilyResult>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct TavilyResult {
+    title: String,
+    url: String,
+    content: String,
+}
+
 pub struct TavilySearchProvider {
-    client: reqwest::Client,
     api_key: String,
-    max_chars: usize,
-    timeout_secs: u64,
+    client: Arc<reqwest::Client>,
 }
 
 impl TavilySearchProvider {
     #[must_use]
-    pub fn new(
-        client: reqwest::Client,
-        api_key: &str,
-        max_chars: usize,
-        timeout_secs: u64,
-    ) -> Self {
-        Self {
-            client,
-            api_key: api_key.to_owned(),
-            max_chars,
-            timeout_secs,
-        }
+    pub fn new(api_key: String, client: Arc<reqwest::Client>) -> Self {
+        Self { api_key, client }
     }
 
-    async fn search_internal(
+    async fn search_tavily(
         &self,
         query: &str,
         max_results: usize,
-    ) -> Result<Vec<SourceMaterial>, RunError> {
-        const ENDPOINT: &str = "https://api.tavily.com/search";
-        let response = timeout(Duration::from_secs(self.timeout_secs), async {
+    ) -> Result<Vec<SourceMaterial>> {
+        let request_body = json!({
+            "api_key": &self.api_key,
+            "query": query,
+            "search_depth": "advanced",
+            "max_results": max_results,
+        });
+
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
             self.client
-                .post(ENDPOINT)
-                .json(&TavilySearchRequest {
-                    api_key: self.api_key.clone(),
-                    query: query.to_owned(),
-                    topic: "general".to_owned(),
-                    search_depth: "basic".to_owned(),
-                    max_results,
-                    include_answer: false,
-                    include_images: false,
-                    include_raw_content: false,
-                })
-                .send()
-                .await
-        })
+                .post("https://api.tavily.com/search")
+                .json(&request_body)
+                .send(),
+        )
         .await
-        .map_err(|_| RunError::Timeout(format!("search timed out for query `{query}`")))?
-        .map_err(|error| RunError::Network(error.to_string()))?;
+        .map_err(|_| {
+            Box::new(Error::explain(
+                ErrorType::Timeout,
+                format!("search timed out for query `{query}`"),
+            ))
+        })?
+        .or_err(ErrorType::Network, "Tavily search request failed")?;
 
-        let status = response.status();
-        let body = response
-            .text()
-            .await
-            .map_err(|error| RunError::Network(error.to_string()))?;
-
-        if !status.is_success() {
-            warn!(query, status = %status, "Tavily search request failed");
-            debug!(response_preview = %truncate_chars(&body, 400), "Tavily failure response preview");
-            return Err(RunError::Provider(format!(
-                "tavily search failed with status {status}"
-            )));
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            let mut err = Error::explain(
+                ErrorType::Provider,
+                format!("Tavily API error ({}): {}", status, body),
+            );
+            if status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                err = err.set_retry(RetryType::Retry);
+            }
+            return Err(Box::new(err.set_source(ErrorSource::Upstream)));
         }
 
-        let payload: TavilySearchResponse = serde_json::from_str(&body).map_err(|error| {
-            RunError::Provider(format!("failed to parse Tavily response: {error}"))
-        })?;
-        let results = payload
+        let search_response: TavilySearchResponse = response
+            .json()
+            .await
+            .or_err(ErrorType::Provider, "failed to parse Tavily response")?;
+
+        let materials = search_response
             .results
             .into_iter()
-            .map(|result| SourceMaterial {
+            .map(|r| SourceMaterial {
+                title: Some(r.title),
+                url: r.url,
+                content: truncate_chars(&r.content, 4000),
                 kind: SourceKind::SearchResult,
-                title: Some(result.title),
-                url: result.url,
-                summary: none_if_empty(result.content.trim()),
-                content: truncate_chars(result.content.trim(), self.max_chars),
+                summary: None,
             })
-            .collect::<Vec<_>>();
+            .collect();
 
-        info!(query, results = results.len(), "completed Tavily search");
-        Ok(results)
+        Ok(materials)
     }
 }
 
@@ -94,55 +96,8 @@ impl SearchProvider for TavilySearchProvider {
         &self,
         query: &str,
         max_results: usize,
-    ) -> agent_kernel::BoxFuture<'_, Result<Vec<SourceMaterial>, RunError>> {
+    ) -> agent_kernel::BoxFuture<'_, Result<Vec<SourceMaterial>>> {
         let query = query.to_owned();
-        Box::pin(async move { self.search_internal(&query, max_results).await })
-    }
-}
-
-fn none_if_empty(value: &str) -> Option<String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_owned())
-    }
-}
-
-#[derive(Debug, Serialize)]
-struct TavilySearchRequest {
-    api_key: String,
-    query: String,
-    topic: String,
-    search_depth: String,
-    max_results: usize,
-    include_answer: bool,
-    include_images: bool,
-    include_raw_content: bool,
-}
-
-#[derive(Debug, Deserialize)]
-struct TavilySearchResponse {
-    #[serde(default)]
-    results: Vec<TavilySearchResult>,
-}
-
-#[derive(Debug, Deserialize)]
-struct TavilySearchResult {
-    title: String,
-    url: String,
-    #[serde(default)]
-    content: String,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::none_if_empty;
-
-    #[test]
-    fn empty_strings_become_none() {
-        assert_eq!(none_if_empty(""), None);
-        assert_eq!(none_if_empty("  "), None);
-        assert_eq!(none_if_empty("value").as_deref(), Some("value"));
+        Box::pin(async move { self.search_tavily(&query, max_results).await })
     }
 }

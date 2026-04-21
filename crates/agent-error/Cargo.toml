@@ -1,14 +1,9 @@
 [package]
-name = "agent-kernel"
+name = "agent-error"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
-agent-error.workspace = true
-rig.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tokio.workspace = true
-
-[lints]
-workspace = true
+tracing.workspace = true
