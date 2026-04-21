@@ -1,6 +1,5 @@
 use agent_kernel::{
-    Error, ErrorSource, ErrorType, Result, RetryType, SourceFetcher, SourceKind, SourceMaterial,
-    truncate_chars,
+    Error, ErrorType, Result, SourceFetcher, SourceKind, SourceMaterial, truncate_chars,
 };
 use std::sync::Arc;
 
@@ -15,7 +14,7 @@ impl ReqwestFetcher {
     }
 
     async fn fetch_url(&self, url: &str) -> Result<SourceMaterial> {
-        let jina_url = format!("https://r.jina.ai/{}", url);
+        let jina_url = format!("https://r.jina.ai/{url}");
 
         let response = tokio::time::timeout(
             std::time::Duration::from_secs(45), // Increased timeout for Jina
@@ -46,13 +45,12 @@ impl ReqwestFetcher {
         if !response.status().is_success() {
             let status = response.status();
             return Ok(SourceMaterial {
-                title: Some(format!("Error: {}", status)),
+                title: Some(format!("Error: {status}")),
                 url: url.to_owned(),
                 content: format!(
-                    "FAILED to access the URL {}. HTTP Status: {}. \
+                    "FAILED to access the URL {url}. HTTP Status: {status}. \
                     This URL might be invalid or the site might be blocking scrapers. \
-                    Please use another URL or rely on your search summaries.",
-                    url, status
+                    Please use another URL or rely on your search summaries."
                 ),
                 kind: SourceKind::UserUrl,
                 summary: None,

@@ -44,6 +44,36 @@ impl Document {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_render_markdown() {
+        let doc = Document {
+            title: Some("My Document".to_string()),
+            blocks: vec![
+                DocumentBlock {
+                    kind: BlockKind::Heading { level: 1 },
+                    text: "Main Title".to_string(),
+                },
+                DocumentBlock {
+                    kind: BlockKind::Paragraph,
+                    text: "This is a paragraph.".to_string(),
+                },
+                DocumentBlock {
+                    kind: BlockKind::Heading { level: 2 },
+                    text: "Sub Section".to_string(),
+                },
+            ],
+        };
+
+        let markdown = doc.render_markdown();
+        let expected = "# Main Title\n\nThis is a paragraph.\n\n## Sub Section";
+        assert_eq!(markdown, expected);
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DocxSourcePolicy {
     pub disable_research: bool,

@@ -7,6 +7,7 @@ use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::{Mutex, RwLock};
 
 /// Tool to edit a document by replacing old text with new text.
@@ -45,6 +46,7 @@ impl Tool for EditDocumentTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        let start = Instant::now();
         let mut content = self.current_content.write().await;
         if !content.contains(&args.old_text) {
             return Err(Box::new(Error::explain(
@@ -56,18 +58,23 @@ impl Tool for EditDocumentTool {
         let new_content = content.replace(&args.old_text, &args.new_text);
         *content = new_content;
 
+        let duration = start.elapsed().as_millis();
+        #[allow(clippy::cast_possible_truncation)]
+        let duration = duration as u64;
         let mut traj = self.trajectory.lock().await;
         traj.steps.push(TrajectoryStep::Thought {
             text: format!(
-                "Surgically replaced `{}` with `{}`",
-                args.old_text, args.new_text
+                "Surgically replaced `{old_text}` with `{new_text}`",
+                old_text = args.old_text,
+                new_text = args.new_text
             ),
             usage: None,
+            duration_ms: Some(duration),
         });
 
         Ok(format!(
-            "Successfully replaced text. New document length: {} characters.",
-            content.len()
+            "Successfully replaced text. New document length: {len} characters.",
+            len = content.len()
         ))
     }
 }
@@ -106,7 +113,11 @@ impl Tool for WebSearchTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        let start = Instant::now();
         let results = self.provider.search(&args.query, 5).await?;
+        let duration = start.elapsed().as_millis();
+        #[allow(clippy::cast_possible_truncation)]
+        let duration = duration as u64;
 
         // Format detailed results for the LLM to see immediately
         let mut formatted_results = Vec::new();
@@ -126,13 +137,15 @@ impl Tool for WebSearchTool {
         traj.steps.push(TrajectoryStep::Action {
             tool: Self::NAME.to_string(),
             input: json!(args),
-            output: format!("Found {} search results", results.len()),
+            output: format!("Found {len} search results", len = results.len()),
+            is_error: false,
+            duration_ms: Some(duration),
         });
 
         Ok(format!(
-            "Search completed. Found {} results. Use the actual URLs provided below to avoid 404s. Results: {}",
-            results.len(),
-            serde_json::to_string(&formatted_results).unwrap_or_default()
+            "Search completed. Found {len} results. Use the actual URLs provided below to avoid 404s. Results: {res}",
+            len = results.len(),
+            res = serde_json::to_string(&formatted_results).unwrap_or_default()
         ))
     }
 }
@@ -171,7 +184,11 @@ impl Tool for FetchUrlTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        let start = Instant::now();
         let material = self.fetcher.fetch(&args.url).await?;
+        let duration = start.elapsed().as_millis();
+        #[allow(clippy::cast_possible_truncation)]
+        let duration = duration as u64;
 
         let mut context = self.context.write().await;
         context.search_results.push(material.clone());
@@ -180,13 +197,15 @@ impl Tool for FetchUrlTool {
         traj.steps.push(TrajectoryStep::Action {
             tool: Self::NAME.to_string(),
             input: json!(args),
-            output: format!("Fetched content from {}", args.url),
+            output: format!("Fetched content from {url}", url = args.url),
+            is_error: false,
+            duration_ms: Some(duration),
         });
 
         Ok(format!(
-            "Successfully fetched content from {}. Content preview: {}",
-            args.url,
-            material.content.chars().take(1000).collect::<String>()
+            "Successfully fetched content from {url}. Content preview: {content}",
+            url = args.url,
+            content = material.content.chars().take(1000).collect::<String>()
         ))
     }
 }

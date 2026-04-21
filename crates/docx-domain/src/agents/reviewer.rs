@@ -4,6 +4,7 @@ use agent_kernel::{
     Result, TrajectoryStep,
 };
 use std::sync::Arc;
+use std::time::Instant;
 
 pub struct DocumentReviewer {
     llm: Arc<dyn LanguageModel>,
@@ -28,7 +29,11 @@ impl AutonomousAgent for DocumentReviewer {
                 ReviewerTemplates::evaluation_task(&context.task_goal, &context.current_document);
             drop(context);
 
+            let start = Instant::now();
             let completion = self.llm.complete(&prompt).await?;
+            let duration = start.elapsed().as_millis();
+            #[allow(clippy::cast_possible_truncation)]
+            let duration = duration as u64;
 
             let feedback: AgentFeedback = serde_json::from_str(&completion.text).map_err(|e| {
                 Box::new(Error::explain(
@@ -52,6 +57,7 @@ impl AutonomousAgent for DocumentReviewer {
                     feedback.passed
                 ),
                 usage: Some(completion.usage),
+                duration_ms: Some(duration),
             });
 
             Ok(())

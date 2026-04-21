@@ -6,6 +6,7 @@ use agent_kernel::{
 use agent_tools::{FetchUrlTool, WebSearchTool};
 use rig::completion::Prompt;
 use std::sync::Arc;
+use std::time::Instant;
 
 pub struct DocumentWriter {
     llm: Arc<dyn LanguageModel>,
@@ -38,7 +39,10 @@ impl AutonomousAgent for DocumentWriter {
             let context = session.context.read().await;
 
             let prompt = if let Some(feedback) = context.feedback_history.last() {
-                tracing::info!("Refinement task triggered based on feedback score: {}/10", feedback.score);
+                tracing::info!(
+                    "Refinement task triggered based on feedback score: {}/10",
+                    feedback.score
+                );
                 WriterTemplates::refinement_task(
                     &context.task_goal,
                     &context.current_document,
@@ -84,10 +88,14 @@ impl AutonomousAgent for DocumentWriter {
                 .default_max_turns(10) // Allow up to 10 rounds of tool usage
                 .build();
 
-            tracing::info!("Executing Writer agent ReAct loop (model: {}). Max autonomous turns: 10.", self.llm.model_id());
+            tracing::info!(
+                "Executing Writer agent ReAct loop (model: {}). Max autonomous turns: 10.",
+                self.llm.model_id()
+            );
 
             // Run the agent. It will autonomously decide whether to call tools (search/fetch)
             // in a ReAct loop before returning the final expanded document.
+            let start = Instant::now();
             let text = agent.prompt(&prompt).await.map_err(|e| {
                 tracing::error!(
                     error = %e,
@@ -96,9 +104,15 @@ impl AutonomousAgent for DocumentWriter {
                 );
                 agent_kernel::Error::explain(
                     agent_kernel::ErrorType::Provider,
-                    format!("Agent autonomous loop failed (model: {}): {e}", self.llm.model_id()),
+                    format!(
+                        "Agent autonomous loop failed (model: {}): {e}",
+                        self.llm.model_id()
+                    ),
                 )
             })?;
+            let duration = start.elapsed().as_millis();
+            #[allow(clippy::cast_possible_truncation)]
+            let duration = duration as u64;
 
             tracing::info!(
                 response_length = text.len(),
@@ -108,33 +122,47 @@ impl AutonomousAgent for DocumentWriter {
             let mut context = session.context.write().await;
             context.current_document.clone_from(&text);
 
-            let mut telemetry = session.telemetry.lock().await;
-            let prompt_tokens = prompt.split_whitespace().count();
-            let completion_tokens = text.split_whitespace().count();
-            telemetry.add_usage(
-                self.llm.model_id(),
-                agent_kernel::TokenUsage {
-                    prompt_tokens,
-                    completion_tokens,
-                    total_tokens: prompt_tokens + completion_tokens,
-                },
-            );
-
-            let mut trajectory = session.trajectory.lock().await;
-            trajectory.steps.push(TrajectoryStep::Thought {
-                text: format!(
-                    "Writer (model: {}) autonomously researched and finalized the document. Response preview: {}...",
-                    self.llm.model_id(),
-                    text.chars().take(100).collect::<String>()
-                ),
-                usage: Some(agent_kernel::TokenUsage {
-                    prompt_tokens,
-                    completion_tokens,
-                    total_tokens: prompt_tokens + completion_tokens,
-                }),
-            });
+            self.record_telemetry(session, &prompt, &text, duration)
+                .await;
 
             Ok(())
         })
+    }
+}
+
+impl DocumentWriter {
+    async fn record_telemetry(
+        &self,
+        session: &AgentSession,
+        prompt: &str,
+        text: &str,
+        duration: u64,
+    ) {
+        let mut telemetry = session.telemetry.lock().await;
+        let prompt_tokens = prompt.split_whitespace().count();
+        let completion_tokens = text.split_whitespace().count();
+        telemetry.add_usage(
+            self.llm.model_id(),
+            agent_kernel::TokenUsage {
+                prompt_tokens,
+                completion_tokens,
+                total_tokens: prompt_tokens + completion_tokens,
+            },
+        );
+
+        let mut trajectory = session.trajectory.lock().await;
+        trajectory.steps.push(TrajectoryStep::Thought {
+            text: format!(
+                "Writer (model: {id}) autonomously researched and finalized the document. Response preview: {preview}...",
+                id = self.llm.model_id(),
+                preview = text.chars().take(100).collect::<String>()
+            ),
+            usage: Some(agent_kernel::TokenUsage {
+                prompt_tokens,
+                completion_tokens,
+                total_tokens: prompt_tokens + completion_tokens,
+            }),
+            duration_ms: Some(duration),
+        });
     }
 }
