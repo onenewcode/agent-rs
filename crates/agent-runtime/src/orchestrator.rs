@@ -1,10 +1,10 @@
+use crate::generate_run_id;
+use agent_kernel::{
+    AgentContext, AgentSession, AgentTrajectory, AutonomousAgent, Error, ErrorSource, ErrorType,
+    Result, RetryType, RunReport, Telemetry,
+};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
-use agent_kernel::{
-    AgentContext, AgentSession, AgentTrajectory, AutonomousAgent, Result, Error, ErrorType, ErrorSource, RetryType, RunReport,
-    Telemetry,
-};
-use crate::generate_run_id;
 
 use crate::retry::{RetryPolicy, retry_with_backoff};
 
@@ -35,11 +35,7 @@ impl AgentOrchestrator {
         self
     }
 
-    pub async fn run(
-        &self,
-        task_goal: String,
-        initial_doc: String,
-    ) -> Result<(RunReport, String)> {
+    pub async fn run(&self, task_goal: String, initial_doc: String) -> Result<(RunReport, String)> {
         let start_time = std::time::Instant::now();
         let session_id = generate_run_id("mas.expansion");
         let context = Arc::new(RwLock::new(AgentContext::new(task_goal, initial_doc)));
@@ -61,12 +57,12 @@ impl AgentOrchestrator {
                 &format!("Writer turn (iteration {iteration})"),
                 &self.retry_policy,
                 || self.writer.run(&session),
-                |e| e.is_retryable(),
+                agent_kernel::Error::is_retryable,
             )
             .await
             .map_err(|e| {
                 tracing::error!(agent = self.writer.role(), iteration, error = %e, "Writer agent failed critically");
-                Box::new(Error::explain(ErrorType::Provider, format!("{} agent failed: {}", self.writer.role(), e))
+                Box::new(Error::explain(ErrorType::Provider, format!("{} agent failed: {e}", self.writer.role()))
                     .set_source(ErrorSource::Internal)
                     .set_retry(RetryType::Fatal))
             })?;
@@ -77,12 +73,12 @@ impl AgentOrchestrator {
                 &format!("Reviewer turn (iteration {iteration})"),
                 &self.retry_policy,
                 || self.reviewer.run(&session),
-                |e| e.is_retryable(),
+                agent_kernel::Error::is_retryable,
             )
             .await
             .map_err(|e| {
                 tracing::error!(agent = self.reviewer.role(), iteration, error = %e, "Reviewer agent failed critically");
-                Box::new(Error::explain(ErrorType::Provider, format!("{} agent failed: {}", self.reviewer.role(), e))
+                Box::new(Error::explain(ErrorType::Provider, format!("{} agent failed: {e}", self.reviewer.role()))
                     .set_source(ErrorSource::Internal)
                     .set_retry(RetryType::Fatal))
             })?;
@@ -96,9 +92,9 @@ impl AgentOrchestrator {
 
         let ctx = context.read().await;
         let final_doc = ctx.current_document.clone();
-        let tel = telemetry.lock().await.clone();
+        let tel = *telemetry.lock().await;
         let traj = trajectory.lock().await.clone();
-        
+
         let report = RunReport {
             run_id: session_id,
             agent_role: "CollaborativePair".to_owned(),

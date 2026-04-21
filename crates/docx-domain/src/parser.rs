@@ -1,5 +1,7 @@
-use agent_kernel::{DocumentParser, Error, ErrorType, Result, normalize_whitespace, OrErr, OkOrErr};
-use crate::model::{Document, DocumentBlock, BlockKind};
+use crate::model::{BlockKind, Document, DocumentBlock};
+use agent_kernel::{
+    DocumentParser, Error, ErrorType, OkOrErr, OrErr, Result, normalize_whitespace,
+};
 use std::fs::File;
 use std::path::Path;
 
@@ -20,7 +22,7 @@ impl DocxParser {
         let mut document_xml = archive
             .by_name("word/document.xml")
             .or_err(ErrorType::Parse, "word/document.xml missing in docx")?;
-        
+
         std::io::Read::read_to_string(&mut document_xml, &mut content)
             .or_err(ErrorType::Parse, "failed to read word/document.xml")?;
 
@@ -28,7 +30,8 @@ impl DocxParser {
     }
 
     fn parse_xml(xml: &str) -> Result<Document> {
-        let doc = roxmltree::Document::parse(xml).or_err(ErrorType::Parse, "failed to parse word/document.xml")?;
+        let doc = roxmltree::Document::parse(xml)
+            .or_err(ErrorType::Parse, "failed to parse word/document.xml")?;
 
         let body = doc
             .descendants()

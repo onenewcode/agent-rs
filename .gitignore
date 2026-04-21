@@ -1,11 +1,42 @@
-__pycache__/
-*.pyc
+# OS files
 .DS_Store
+Thumbs.db
+*.tmp
 
+# Build artifacts
 target/
-test_data/
+debug/
+release/
+
+# Configuration and secrets
 agent.toml
+.env
+*.env
+.env.*
+
+# Scripts and Environment (used with uv)
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+env/
+venv/
+.python-version
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+.project
+.settings/
+
+# AI / Agent specific
 .codex/
 .gemini/
 .claude/
 .agent-cache/
+
+# Test data and temporary outputs
+test_data/
+*.expanded.docx

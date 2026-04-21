@@ -1,7 +1,7 @@
 #![allow(clippy::missing_errors_doc)]
 pub mod agents;
-pub mod parser;
 mod model;
+pub mod parser;
 mod prompts;
 
 pub use model::{Document, DocxExpandRequest, DocxSourcePolicy};

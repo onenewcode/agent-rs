@@ -31,10 +31,7 @@ pub trait LanguageModel: Send + Sync {
 
 pub trait AutonomousAgent: Send + Sync {
     fn role(&self) -> &'static str;
-    fn run<'a>(
-        &'a self,
-        session: &'a crate::agent::AgentSession,
-    ) -> BoxFuture<'a, Result<()>>;
+    fn run<'a>(&'a self, session: &'a crate::agent::AgentSession) -> BoxFuture<'a, Result<()>>;
 }
 
 pub trait SourceFetcher: Send + Sync {

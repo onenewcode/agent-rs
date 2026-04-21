@@ -1,6 +1,6 @@
 use agent_kernel::{
-    Error, ErrorSource, ErrorType, Result, SearchProvider, SourceKind, SourceMaterial,
-    truncate_chars, OrErr, RetryType,
+    Error, ErrorSource, ErrorType, OrErr, Result, RetryType, SearchProvider, SourceKind,
+    SourceMaterial, truncate_chars,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -29,11 +29,7 @@ impl TavilySearchProvider {
         Self { api_key, client }
     }
 
-    async fn search_tavily(
-        &self,
-        query: &str,
-        max_results: usize,
-    ) -> Result<Vec<SourceMaterial>> {
+    async fn search_tavily(&self, query: &str, max_results: usize) -> Result<Vec<SourceMaterial>> {
         let request_body = json!({
             "api_key": &self.api_key,
             "query": query,
@@ -62,7 +58,7 @@ impl TavilySearchProvider {
             let body = response.text().await.unwrap_or_default();
             let mut err = Error::explain(
                 ErrorType::Provider,
-                format!("Tavily API error ({}): {}", status, body),
+                format!("Tavily API error ({status}): {body}"),
             );
             if status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS {
                 err = err.set_retry(RetryType::Retry);

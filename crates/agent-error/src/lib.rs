@@ -1,6 +1,6 @@
+use serde::{Deserialize, Serialize};
 use std::error::Error as StdError;
 use std::fmt;
-use serde::{Serialize, Deserialize};
 
 /// Boxed error type for easy chaining and passing.
 pub type BError = Box<Error>;
@@ -57,14 +57,14 @@ impl Error {
         }
     }
 
-    pub fn because<E>(cause: E, etype: ErrorType, context: String) -> Self 
-    where 
-        E: Into<Box<dyn StdError + Send + Sync + 'static>>
+    pub fn because<E>(cause: E, etype: ErrorType, context: String) -> Self
+    where
+        E: Into<Box<dyn StdError + Send + Sync + 'static>>,
     {
         Self {
             etype,
             esource: ErrorSource::Internal, // Default, can be adjusted
-            retry: RetryType::Fatal,       // Default, can be adjusted
+            retry: RetryType::Fatal,        // Default, can be adjusted
             cause: Some(cause.into()),
             context: Some(context),
         }
@@ -97,13 +97,19 @@ impl Error {
 
 impl StdError for Error {
     fn source(&self) -> Option<&(dyn StdError + 'static)> {
-        self.cause.as_ref().map(|e| e.as_ref() as &(dyn StdError + 'static))
+        self.cause
+            .as_ref()
+            .map(|e| e.as_ref() as &(dyn StdError + 'static))
     }
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "[{:?}] from {:?} (Retry: {:?})", self.etype, self.esource, self.retry)?;
+        write!(
+            f,
+            "[{:?}] from {:?} (Retry: {:?})",
+            self.etype, self.esource, self.retry
+        )?;
         if let Some(ctx) = &self.context {
             write!(f, ": {}", ctx)?;
         }
@@ -119,9 +125,9 @@ pub trait OrErr<T, E> {
     fn or_err(self, etype: ErrorType, context: &str) -> Result<T>;
 }
 
-impl<T, E> OrErr<T, E> for std::result::Result<T, E> 
-where 
-    E: Into<Box<dyn StdError + Send + Sync + 'static>>
+impl<T, E> OrErr<T, E> for std::result::Result<T, E>
+where
+    E: Into<Box<dyn StdError + Send + Sync + 'static>>,
 {
     fn or_err(self, etype: ErrorType, context: &str) -> Result<T> {
         self.map_err(|e| Box::new(Error::because(e, etype, context.to_string())))

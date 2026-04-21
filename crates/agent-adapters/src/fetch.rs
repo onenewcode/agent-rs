@@ -1,6 +1,6 @@
 use agent_kernel::{
-    Error, ErrorSource, ErrorType, Result, SourceFetcher, SourceKind, SourceMaterial,
-    truncate_chars, OrErr, RetryType,
+    Error, ErrorSource, ErrorType, OrErr, Result, RetryType, SourceFetcher, SourceKind,
+    SourceMaterial, truncate_chars,
 };
 use std::sync::Arc;
 
@@ -32,7 +32,7 @@ impl ReqwestFetcher {
             let status = response.status();
             let mut err = Error::explain(
                 ErrorType::Network,
-                format!("failed to fetch {url}: HTTP {}", status),
+                format!("failed to fetch {url}: HTTP {status}"),
             );
             if status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS {
                 err = err.set_retry(RetryType::Retry);
@@ -40,10 +40,10 @@ impl ReqwestFetcher {
             return Err(Box::new(err.set_source(ErrorSource::Upstream)));
         }
 
-        let content = response
-            .text()
-            .await
-            .or_err(ErrorType::Network, &format!("failed to read response text from {url}"))?;
+        let content = response.text().await.or_err(
+            ErrorType::Network,
+            &format!("failed to read response text from {url}"),
+        )?;
 
         Ok(SourceMaterial {
             title: Some(url.to_owned()),
