@@ -27,6 +27,42 @@ impl DocumentWriter {
             fetcher,
         }
     }
+
+    fn build_agent<'a>(
+        &'a self,
+        session: &'a AgentSession,
+    ) -> rig::agent::Agent<impl rig::completion::CompletionModel> {
+        self.llm
+            .agent_builder()
+            .preamble(
+                "You are an autonomous document research and writing agent. \
+                You have access to tools to search the web, fetch specific URLs, and edit the document surgically. \
+                \
+                CRITICAL INSTRUCTIONS:\n\
+                1. If you need more information, use `web_search` or `fetch_url` autonomously.\n\
+                2. If a tool returns an error (like 404), do not stop; use other search results or your internal knowledge to proceed.\n\
+                3. To fix issues without rewriting everything, use `edit_document` to replace specific text segments. \n\
+                4. If you used `edit_document` for all your changes, your FINAL response MUST BE EXACTLY 'DONE_EDITING'. \n\
+                5. If you choose to rewrite the whole document, your FINAL response MUST start with 'FULL_DOCUMENT:\\n' followed by the complete expanded document text.\n\
+                6. Do not output conversational filler if outputting the full document."
+            )
+            .tool(WebSearchTool {
+                provider: self.search.clone(),
+                context: session.context.clone(),
+                trajectory: session.trajectory.clone(),
+            })
+            .tool(FetchUrlTool {
+                fetcher: self.fetcher.clone(),
+                context: session.context.clone(),
+                trajectory: session.trajectory.clone(),
+            })
+            .tool(EditDocumentTool {
+                context: session.context.clone(),
+                trajectory: session.trajectory.clone(),
+            })
+            .default_max_turns(10)
+            .build()
+    }
 }
 
 impl AutonomousAgent for DocumentWriter {
@@ -59,37 +95,7 @@ impl AutonomousAgent for DocumentWriter {
                 "Prepared prompt for Writer agent"
             );
 
-            let agent = self
-                .llm
-                .agent_builder()
-                .preamble(
-                    "You are an autonomous document research and writing agent. \
-                    You have access to tools to search the web, fetch specific URLs, and edit the document surgically. \
-                    \
-                    CRITICAL INSTRUCTIONS:\n\
-                    1. If you need more information, use `web_search` or `fetch_url` autonomously.\n\
-                    2. If a tool returns an error (like 404), do not stop; use other search results or your internal knowledge to proceed.\n\
-                    3. To fix issues without rewriting everything, use `edit_document` to replace specific text segments. \n\
-                    4. If you used `edit_document`, your FINAL response can just be a confirmation like 'Done editing.' \n\
-                    5. If you do NOT use `edit_document` and choose to rewrite the whole text, your FINAL response must be the COMPLETE expanded document text.\n\
-                    6. Do not output conversational filler if outputting the full document."
-                )
-                .tool(WebSearchTool {
-                    provider: self.search.clone(),
-                    context: session.context.clone(),
-                    trajectory: session.trajectory.clone(),
-                })
-                .tool(FetchUrlTool {
-                    fetcher: self.fetcher.clone(),
-                    context: session.context.clone(),
-                    trajectory: session.trajectory.clone(),
-                })
-                .tool(EditDocumentTool {
-                    context: session.context.clone(),
-                    trajectory: session.trajectory.clone(),
-                })
-                .default_max_turns(10)
-                .build();
+            let agent = self.build_agent(session);
 
             tracing::info!(
                 "Executing Writer agent ReAct loop (model: {}). Max autonomous turns: 10.",
@@ -122,10 +128,26 @@ impl AutonomousAgent for DocumentWriter {
 
             let mut context = session.context.write().await;
 
-            // Only overwrite if the text is substantial enough to be a whole document
-            // otherwise, assume it was a tool-based surgical edit.
-            if text.len() > 100 && !text.to_lowercase().contains("done editing") {
-                context.current_document.clone_from(&text);
+            // Deterministic check for tool usage vs full document rewrite
+            if text.trim() == "DONE_EDITING" {
+                tracing::info!("Writer agent completed via surgical edits");
+            } else if let Some(document_text) = text.strip_prefix("FULL_DOCUMENT:\n") {
+                tracing::info!("Writer agent completed via full document rewrite");
+                context.current_document = document_text.to_string();
+            } else {
+                // Heuristic fallback if model added conversational filler before prefix
+                if let Some(pos) = text.find("FULL_DOCUMENT:") {
+                    let document_text = &text[pos + "FULL_DOCUMENT:".len()..];
+                    context.current_document = document_text.trim_start().to_string();
+                    tracing::info!(
+                        "Writer agent completed via full document rewrite (with heuristic fallback)"
+                    );
+                } else {
+                    tracing::warn!(
+                        response = text,
+                        "Writer agent returned ambiguous response, document not updated"
+                    );
+                }
             }
 
             self.record_telemetry(session, &prompt, &text, duration)
