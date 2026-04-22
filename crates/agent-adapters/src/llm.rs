@@ -13,15 +13,15 @@ pub struct OpenRouterModel {
 
 impl OpenRouterModel {
     /// Creates a new `OpenRouterModel`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the `OpenRouter` client cannot be created.
-    #[must_use]
-    pub fn new(model_id: String, api_key: &str) -> Self {
-        let client = rig::providers::openrouter::Client::new(api_key)
-            .expect("failed to create OpenRouter client");
-        Self { model_id, client }
+    pub fn new(model_id: String, api_key: &str) -> Result<Self> {
+        let client = rig::providers::openrouter::Client::new(api_key).map_err(|e| {
+            Box::new(Error::because(
+                e,
+                ErrorType::Config,
+                "failed to create OpenRouter client",
+            ))
+        })?;
+        Ok(Self { model_id, client })
     }
 
     #[must_use]

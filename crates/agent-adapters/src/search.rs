@@ -20,13 +20,18 @@ struct TavilyResult {
 
 pub struct TavilySearchProvider {
     api_key: String,
+    base_url: String,
     client: Arc<reqwest::Client>,
 }
 
 impl TavilySearchProvider {
     #[must_use]
-    pub fn new(api_key: String, client: Arc<reqwest::Client>) -> Self {
-        Self { api_key, client }
+    pub fn new(api_key: String, client: Arc<reqwest::Client>, base_url: Option<String>) -> Self {
+        Self {
+            api_key,
+            base_url: base_url.unwrap_or_else(|| "https://api.tavily.com/search".to_owned()),
+            client,
+        }
     }
 
     async fn search_tavily(&self, query: &str, max_results: usize) -> Result<Vec<SourceMaterial>> {
@@ -40,7 +45,7 @@ impl TavilySearchProvider {
         let response = tokio::time::timeout(
             std::time::Duration::from_secs(30),
             self.client
-                .post("https://api.tavily.com/search")
+                .post(&self.base_url)
                 .json(&request_body)
                 .send(),
         )
@@ -55,7 +60,7 @@ impl TavilySearchProvider {
 
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
+            let body = response.text().await.unwrap_or_else(|_| "Unknown error".to_owned());
             let mut err = Error::explain(
                 ErrorType::Provider,
                 format!("Tavily API error ({status}): {body}"),

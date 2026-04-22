@@ -71,7 +71,6 @@ impl AgentAuditor for DialogueInspector {
         
         let stall_count = context.audit_log.iter().filter(|v| v.is_stalled).count();
         if !context.audit_log.is_empty() {
-            #[allow(clippy::cast_precision_loss)]
             communication_efficiency = 1.0 - (stall_count as f32 / context.audit_log.len() as f32);
         }
         

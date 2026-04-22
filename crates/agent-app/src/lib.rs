@@ -44,6 +44,7 @@ pub struct ModelProviderConfig {
 pub struct SearchConfig {
     pub provider: String,
     pub api_key: Option<String>,
+    pub base_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -52,11 +53,6 @@ pub struct ArtifactsConfig {
 }
 
 impl AppConfig {
-    /// Loads config from a file path.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the file cannot be read or parsed.
     pub fn from_path(path: &Path) -> Result<Self> {
         let content = std::fs::read_to_string(path)
             .or_err(ErrorType::Config, "failed to read config file")?;
@@ -72,11 +68,6 @@ pub struct AppContainer {
 }
 
 impl AppContainer {
-    /// Creates a new `AppContainer` from the provided config.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if any of the components (HTTP client, models, etc.) fail to initialize.
     pub fn from_config(config: &AppConfig) -> Result<Self> {
         let http_client = Arc::new(
             reqwest::Client::builder()
@@ -87,16 +78,20 @@ impl AppContainer {
         let writer_model = Arc::new(OpenRouterModel::new(
             config.services.models.writer.model.clone(),
             &config.services.models.writer.api_key,
-        ));
+        )?);
 
         let reviewer_model = Arc::new(OpenRouterModel::new(
             config.services.models.reviewer.model.clone(),
             &config.services.models.reviewer.api_key,
-        ));
+        )?);
 
         let search_provider: Arc<dyn SearchProvider> =
             if let Some(key) = &config.services.search.api_key {
-                Arc::new(TavilySearchProvider::new(key.clone(), http_client.clone()))
+                Arc::new(TavilySearchProvider::new(
+                    key.clone(),
+                    http_client.clone(),
+                    config.services.search.base_url.clone(),
+                ))
             } else {
                 return Err(Box::new(Error::explain(
                     ErrorType::Config,
@@ -129,20 +124,10 @@ impl AppContainer {
         })
     }
 
-    /// Parses a DOCX document.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the document cannot be parsed.
     pub fn parse_doc(&self, path: &Path) -> Result<Document> {
         self.parser.parse_path(path)
     }
 
-    /// Runs the document expansion process.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the expansion process fails.
     pub async fn run_expansion(
         &self,
         task_goal: String,

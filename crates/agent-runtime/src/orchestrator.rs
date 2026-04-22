@@ -47,67 +47,18 @@ impl AgentOrchestrator {
 
         let session = AgentSession {
             session_id: session_id.clone(),
-            context: context.clone(),
-            telemetry: telemetry.clone(),
-            trajectory: trajectory.clone(),
+            context: Arc::clone(&context),
+            telemetry: Arc::clone(&telemetry),
+            trajectory: Arc::clone(&trajectory),
         };
 
         for i in 0..self.max_iterations {
-            let iteration = i + 1;
-            tracing::info!(iteration, "Starting Writer turn");
+            self.execute_iteration(i + 1, &session).await?;
 
-            retry_with_backoff(
-                &format!("Writer turn (iteration {iteration})"),
-                &self.retry_policy,
-                || self.writer.run(&session),
-                agent_kernel::Error::is_retryable,
-            )
-            .await
-            .map_err(|e| {
-                tracing::error!(agent = self.writer.role(), iteration, error = %e, "Writer agent failed critically");
-                Box::new(Error::explain(ErrorType::Provider, format!("{} agent failed: {e}", self.writer.role()))
-                    .set_source(ErrorSource::Internal)
-                    .set_retry(RetryType::Fatal))
-            })?;
-
-            tracing::info!(iteration, "Starting Reviewer turn");
-
-            retry_with_backoff(
-                &format!("Reviewer turn (iteration {iteration})"),
-                &self.retry_policy,
-                || self.reviewer.run(&session),
-                agent_kernel::Error::is_retryable,
-            )
-            .await
-            .map_err(|e| {
-                tracing::error!(agent = self.reviewer.role(), iteration, error = %e, "Reviewer agent failed critically");
-                Box::new(Error::explain(ErrorType::Provider, format!("{} agent failed: {e}", self.reviewer.role()))
-                    .set_source(ErrorSource::Internal)
-                    .set_retry(RetryType::Fatal))
-            })?;
-
-            // Audit the turn
-            let verdict = self.auditor.audit_turn(&session).await?;
-            let mut ctx = context.write().await;
-
-            // If the auditor suggested a correction, prepend it to the task goal for the next iteration
-            if let Some(ref correction) = verdict.suggestion_for_writer {
-                tracing::warn!(
-                    iteration,
-                    "Auditor detected communication stall: {}",
-                    correction
-                );
-                if !ctx.task_goal.contains("CRITICAL: You are ignoring") {
-                    ctx.task_goal = format!("{}\n\n{}", correction, ctx.task_goal);
-                }
-            }
-
-            ctx.audit_log.push(verdict);
-
+            let ctx = context.write().await;
             if let Some(feedback) = ctx.feedback_history.last() {
                 if feedback.passed {
-                    let score = feedback.score;
-                    tracing::info!(score, "Reviewer passed the document. Collaboration complete.");
+                    tracing::info!(score = feedback.score, "Reviewer passed the document. Collaboration complete.");
                     break;
                 }
             }
@@ -117,8 +68,8 @@ impl AgentOrchestrator {
         let final_doc = ctx.current_document.clone();
         let tel = *telemetry.lock().await;
         let traj = trajectory.lock().await.clone();
-
         let audit_report = self.auditor.generate_final_report(&ctx);
+
         tracing::info!(
             efficiency = audit_report.communication_efficiency,
             iterations = audit_report.total_iterations,
@@ -135,5 +86,51 @@ impl AgentOrchestrator {
         };
 
         Ok((report, final_doc))
+    }
+
+    async fn execute_iteration(&self, iteration: usize, session: &AgentSession) -> Result<()> {
+        tracing::info!(iteration, "Starting Writer turn");
+        self.run_agent_with_retry(self.writer.as_ref(), session, iteration).await?;
+
+        tracing::info!(iteration, "Starting Reviewer turn");
+        self.run_agent_with_retry(self.reviewer.as_ref(), session, iteration).await?;
+
+        // Audit the turn
+        let verdict = self.auditor.audit_turn(session).await?;
+        let mut ctx = session.context.write().await;
+
+        if let Some(ref correction) = verdict.suggestion_for_writer {
+            tracing::warn!(iteration, "Auditor detected communication stall: {}", correction);
+            if !ctx.task_goal.contains("CRITICAL: You are ignoring") {
+                ctx.task_goal = format!("{}\n\n{}", correction, ctx.task_goal);
+            }
+        }
+        ctx.audit_log.push(verdict);
+        Ok(())
+    }
+
+    async fn run_agent_with_retry(
+        &self,
+        agent: &dyn AutonomousAgent,
+        session: &AgentSession,
+        iteration: usize,
+    ) -> Result<()> {
+        retry_with_backoff(
+            &format!("{} turn (iteration {iteration})", agent.role()),
+            &self.retry_policy,
+            || agent.run(session),
+            |e| e.is_retryable(),
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!(agent = agent.role(), iteration, error = %e, "Agent failed critically");
+            Box::new(Error::Base {
+                etype: ErrorType::Provider,
+                esource: ErrorSource::Internal,
+                retry: RetryType::Fatal,
+                context: format!("{} agent failed: {e}", agent.role()),
+                cause: Some(e),
+            })
+        })
     }
 }

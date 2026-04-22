@@ -1,7 +1,7 @@
 use crate::prompts::WriterTemplates;
 use agent_kernel::{
     AgentSession, AutonomousAgent, BoxFuture, LanguageModel, Result, SearchProvider, SourceFetcher,
-    TrajectoryStep,
+    TrajectoryStep, truncate_chars,
 };
 use agent_tools::{EditDocumentTool, FetchUrlTool, WebSearchTool};
 use rig::completion::Prompt;
@@ -43,8 +43,8 @@ impl DocumentWriter {
                 2. If a tool returns an error (like 404), do not stop; use other search results or your internal knowledge to proceed.\n\
                 3. To fix issues without rewriting everything, use `edit_document` to replace specific text segments. \n\
                 4. If you used `edit_document` for all your changes, your FINAL response MUST BE EXACTLY 'DONE_EDITING'. \n\
-                5. If you choose to rewrite the whole document, your FINAL response MUST start with 'FULL_DOCUMENT:\\n' followed by the complete expanded document text.\n\
-                6. Do not output conversational filler if outputting the full document."
+                5. If you choose to rewrite the whole document, wrap the text in <expanded_document> tags. \n\
+                6. Do not output conversational filler outside the tagged block if outputting the full document."
             )
             .tool(WebSearchTool {
                 provider: self.search.clone(),
@@ -128,26 +128,41 @@ impl AutonomousAgent for DocumentWriter {
 
             let mut context = session.context.write().await;
 
-            // Deterministic check for tool usage vs full document rewrite
-            if text.trim() == "DONE_EDITING" {
+            // Robust extraction logic supporting XML-like tags or prefix
+            let mut updated = false;
+            let trimmed = text.trim();
+
+            if trimmed == "DONE_EDITING" {
                 tracing::info!("Writer agent completed via surgical edits");
+                updated = true;
+            } else if let Some(pos) = text.find("<expanded_document>") {
+                let end_pos = text.find("</expanded_document>").unwrap_or(text.len());
+                let document_text = &text[pos + "<expanded_document>".len()..end_pos];
+                context.current_document = document_text.trim().to_string();
+                tracing::info!("Writer agent completed via tagged document block");
+                updated = true;
             } else if let Some(document_text) = text.strip_prefix("FULL_DOCUMENT:\n") {
-                tracing::info!("Writer agent completed via full document rewrite");
                 context.current_document = document_text.to_string();
+                tracing::info!("Writer agent completed via full document rewrite (legacy prefix)");
+                updated = true;
             } else {
-                // Heuristic fallback if model added conversational filler before prefix
-                if let Some(pos) = text.find("FULL_DOCUMENT:") {
-                    let document_text = &text[pos + "FULL_DOCUMENT:".len()..];
-                    context.current_document = document_text.trim_start().to_string();
-                    tracing::info!(
-                        "Writer agent completed via full document rewrite (with heuristic fallback)"
-                    );
-                } else {
-                    tracing::warn!(
-                        response = text,
-                        "Writer agent returned ambiguous response, document not updated"
-                    );
+                // Heuristic fallback
+                for marker in &["FULL_DOCUMENT:", "DOCUMENT:", "FINAL_OUTPUT:"] {
+                    if let Some(pos) = text.find(marker) {
+                        let document_text = &text[pos + marker.len()..];
+                        context.current_document = document_text.trim().to_string();
+                        tracing::info!(marker, "Writer agent completed via heuristic fallback");
+                        updated = true;
+                        break;
+                    }
                 }
+            }
+
+            if !updated {
+                tracing::warn!(
+                    response = truncate_chars(&text, 200),
+                    "Writer agent returned ambiguous response, document not updated"
+                );
             }
 
             self.record_telemetry(session, &prompt, &text, duration)

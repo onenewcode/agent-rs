@@ -219,12 +219,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_edit_document_tool_replaces_only_first_occurrence() {
-        let context = Arc::new(RwLock::new(AgentContext {
-            task_goal: "test".to_string(),
-            current_document: "a b a c".to_string(),
-            search_results: Vec::new(),
-            feedback_history: Vec::new(),
-        }));
+        let context = Arc::new(RwLock::new(AgentContext::new("test".to_string(), "a b a c".to_string())));
         let trajectory = Arc::new(Mutex::new(AgentTrajectory::default()));
         let tool = EditDocumentTool {
             context: context.clone(),

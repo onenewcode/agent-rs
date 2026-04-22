@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::error::Error as StdError;
-use std::fmt;
+use thiserror::Error;
 
 /// Boxed error type for easy chaining and passing.
 pub type BError = Box<Error>;
@@ -8,13 +7,17 @@ pub type BError = Box<Error>;
 pub type Result<T, E = BError> = std::result::Result<T, E>;
 
 /// Structured error representing the "what", "where", and "how" of a failure.
-#[derive(Debug)]
-pub struct Error {
-    pub etype: ErrorType,
-    pub esource: ErrorSource,
-    pub retry: RetryType,
-    pub cause: Option<Box<dyn StdError + Send + Sync + 'static>>,
-    pub context: Option<String>,
+#[derive(Debug, Error)]
+pub enum Error {
+    #[error("[{etype:?}] from {esource:?} (Retry: {retry:?}) {context}: {cause:?}")]
+    Base {
+        etype: ErrorType,
+        esource: ErrorSource,
+        retry: RetryType,
+        context: String,
+        #[source]
+        cause: Option<Box<dyn std::error::Error + Send + Sync + 'static>>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -25,11 +28,9 @@ pub enum ErrorType {
     Provider,
     Timeout,
     Evaluation,
-    Workflow,
     Artifact,
     Internal,
     Tool,
-    Custom,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -47,76 +48,45 @@ pub enum RetryType {
 }
 
 impl Error {
-    pub fn new(etype: ErrorType, esource: ErrorSource, retry: RetryType) -> Self {
-        Self {
-            etype,
-            esource,
-            retry,
-            cause: None,
-            context: None,
-        }
-    }
-
-    pub fn because<E>(cause: E, etype: ErrorType, context: String) -> Self
-    where
-        E: Into<Box<dyn StdError + Send + Sync + 'static>>,
-    {
-        Self {
-            etype,
-            esource: ErrorSource::Internal, // Default, can be adjusted
-            retry: RetryType::Fatal,        // Default, can be adjusted
-            cause: Some(cause.into()),
-            context: Some(context),
-        }
-    }
-
-    pub fn explain(etype: ErrorType, context: String) -> Self {
-        Self {
+    pub fn explain(etype: ErrorType, context: impl Into<String>) -> Self {
+        Self::Base {
             etype,
             esource: ErrorSource::Internal,
             retry: RetryType::Fatal,
+            context: context.into(),
             cause: None,
-            context: Some(context),
         }
     }
 
-    pub fn set_source(mut self, source: ErrorSource) -> Self {
-        self.esource = source;
+    pub fn because<E>(cause: E, etype: ErrorType, context: impl Into<String>) -> Self
+    where
+        E: Into<Box<dyn std::error::Error + Send + Sync + 'static>>,
+    {
+        Self::Base {
+            etype,
+            esource: ErrorSource::Internal,
+            retry: RetryType::Fatal,
+            context: context.into(),
+            cause: Some(cause.into()),
+        }
+    }
+
+    pub fn set_source(mut self, new_source: ErrorSource) -> Self {
+        let Self::Base { ref mut esource, .. } = self;
+        *esource = new_source;
         self
     }
 
-    pub fn set_retry(mut self, retry: RetryType) -> Self {
-        self.retry = retry;
+    pub fn set_retry(mut self, new_retry: RetryType) -> Self {
+        let Self::Base { ref mut retry, .. } = self;
+        *retry = new_retry;
         self
     }
 
     pub fn is_retryable(&self) -> bool {
-        self.retry == RetryType::Retry
-    }
-}
-
-impl StdError for Error {
-    fn source(&self) -> Option<&(dyn StdError + 'static)> {
-        self.cause
-            .as_ref()
-            .map(|e| e.as_ref() as &(dyn StdError + 'static))
-    }
-}
-
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "[{:?}] from {:?} (Retry: {:?})",
-            self.etype, self.esource, self.retry
-        )?;
-        if let Some(ctx) = &self.context {
-            write!(f, ": {}", ctx)?;
+        match self {
+            Self::Base { retry, .. } => *retry == RetryType::Retry,
         }
-        if let Some(cause) = &self.cause {
-            write!(f, " | Caused by: {}", cause)?;
-        }
-        Ok(())
     }
 }
 
@@ -127,7 +97,7 @@ pub trait OrErr<T, E> {
 
 impl<T, E> OrErr<T, E> for std::result::Result<T, E>
 where
-    E: Into<Box<dyn StdError + Send + Sync + 'static>>,
+    E: Into<Box<dyn std::error::Error + Send + Sync + 'static>>,
 {
     fn or_err(self, etype: ErrorType, context: &str) -> Result<T> {
         self.map_err(|e| Box::new(Error::because(e, etype, context.to_string())))
@@ -141,24 +111,5 @@ pub trait OkOrErr<T> {
 impl<T> OkOrErr<T> for Option<T> {
     fn or_err(self, etype: ErrorType, context: &str) -> Result<T> {
         self.ok_or_else(|| Box::new(Error::explain(etype, context.to_string())))
-    }
-}
-
-/// Extension trait for adding context to existing errors.
-pub trait Context<T> {
-    fn err_context(self, context: &str) -> Result<T>;
-}
-
-impl<T> Context<T> for Result<T> {
-    fn err_context(mut self, context: &str) -> Result<T> {
-        if let Err(ref mut e) = self {
-            if let Some(ref mut existing) = e.context {
-                existing.push_str(": ");
-                existing.push_str(context);
-            } else {
-                e.context = Some(context.to_string());
-            }
-        }
-        self
     }
 }
