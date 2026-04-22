@@ -1,9 +1,8 @@
-use agent_kernel::{
-    Error, ErrorSource, ErrorType, LanguageModel, LlmCompletion, Result, RetryType, TokenUsage,
-};
+use agent_kernel::{AgentError, ErrorType, LanguageModel, LlmCompletion, Result, RetryType};
+use agent_rig::RigLanguageModel;
 use rig::agent::AgentBuilder;
-use rig::client::CompletionClient;
 use rig::completion::Prompt;
+use rig::client::CompletionClient;
 use rig::providers::openrouter::completion::CompletionModel as OpenRouterCompletionModel;
 
 pub struct OpenRouterModel {
@@ -15,11 +14,10 @@ impl OpenRouterModel {
     /// Creates a new `OpenRouterModel`.
     pub fn new(model_id: String, api_key: &str) -> Result<Self> {
         let client = rig::providers::openrouter::Client::new(api_key).map_err(|e| {
-            Box::new(Error::because(
-                e,
+            AgentError::explain(
                 ErrorType::Config,
-                "failed to create OpenRouter client",
-            ))
+                format!("failed to create OpenRouter client: {e}"),
+            )
         })?;
         Ok(Self { model_id, client })
     }
@@ -43,7 +41,7 @@ impl LanguageModel for OpenRouterModel {
             let agent = client.agent(&model_id).build();
             let text = agent.prompt(&prompt).await.map_err(|error| {
                 let msg = error.to_string();
-                let mut err = Error::explain(ErrorType::Provider, msg.clone());
+                let mut err = AgentError::explain(ErrorType::Provider, msg.clone());
 
                 if msg.contains("429")
                     || msg.contains("rate limit")
@@ -56,26 +54,28 @@ impl LanguageModel for OpenRouterModel {
                     err = err.set_retry(RetryType::Retry);
                 }
 
-                Box::new(err.set_source(ErrorSource::Upstream))
+                err
             })?;
 
-            // Estimate usage since prompt() doesn't return it in this version
-            let prompt_tokens = prompt.split_whitespace().count();
-            let completion_tokens = text.split_whitespace().count();
+            // Accurate Token Counting using centralized utility
+            let usage = agent_kernel::TokenEstimator::estimate(&prompt, &text);
+
+            let mut telemetry = agent_kernel::Telemetry::default();
+            telemetry.add_usage(&model_id, usage);
 
             Ok(LlmCompletion {
                 text,
-                usage: TokenUsage {
-                    prompt_tokens,
-                    completion_tokens,
-                    total_tokens: prompt_tokens + completion_tokens,
-                },
-                estimated_cost_usd: 0.0,
+                usage,
+                estimated_cost_usd: telemetry.estimated_cost_usd,
             })
         })
     }
+}
 
-    fn agent_builder(&self) -> AgentBuilder<OpenRouterCompletionModel> {
+impl RigLanguageModel for OpenRouterModel {
+    type Model = OpenRouterCompletionModel;
+
+    fn agent_builder(&self) -> AgentBuilder<Self::Model> {
         self.client.agent(&self.model_id)
     }
 }

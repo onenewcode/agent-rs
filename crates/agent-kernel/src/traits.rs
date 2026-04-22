@@ -1,8 +1,10 @@
+use crate::agent::{AuditReport, StepOutcome, WorkflowContext};
 use crate::error::Result;
 use crate::telemetry::TokenUsage;
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
+use std::sync::Arc;
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -22,28 +24,20 @@ pub trait LanguageModel: Send + Sync {
 
     /// Completes the prompt and returns the text, token usage, and cost.
     fn complete(&self, prompt: &str) -> BoxFuture<'_, Result<LlmCompletion>>;
-
-    /// Returns a rig `AgentBuilder` pre-configured with the model and system prompt.
-    fn agent_builder(
-        &self,
-    ) -> rig::agent::AgentBuilder<rig::providers::openrouter::completion::CompletionModel>;
 }
 
 pub trait AutonomousAgent: Send + Sync {
     fn role(&self) -> &'static str;
-    fn run<'a>(&'a self, session: &'a crate::agent::AgentSession) -> BoxFuture<'a, Result<()>>;
+    fn run<'a>(&'a self, context: Arc<WorkflowContext>) -> BoxFuture<'a, Result<StepOutcome>>;
 }
 
 pub trait AgentAuditor: Send + Sync {
     fn audit_turn<'a>(
         &'a self,
-        session: &'a crate::agent::AgentSession,
-    ) -> BoxFuture<'a, Result<crate::agent::AuditVerdict>>;
+        context: Arc<WorkflowContext>,
+    ) -> BoxFuture<'a, Result<StepOutcome>>;
 
-    fn generate_final_report(
-        &self,
-        context: &crate::agent::AgentContext,
-    ) -> crate::agent::AuditReport;
+    fn generate_final_report(&self, context: &WorkflowContext) -> AuditReport;
 }
 
 pub trait SourceFetcher: Send + Sync {

@@ -4,10 +4,11 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-agent-error.workspace = true
-rig.workspace = true
+agent-error = { path = "../agent-error" }
+thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tiktoken-rs.workspace = true
 tokio.workspace = true
 
 [lints]

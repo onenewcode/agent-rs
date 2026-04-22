@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 agent-error.workspace = true
 agent-kernel = { path = "../agent-kernel" }
+agent-rig = { path = "../agent-rig" }
 agent-runtime = { path = "../agent-runtime" }
 agent-tools = { path = "../agent-tools" }
 reqwest.workspace = true

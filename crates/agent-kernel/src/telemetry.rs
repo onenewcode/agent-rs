@@ -14,6 +14,24 @@ pub struct Telemetry {
     pub estimated_cost_usd: f64,
 }
 
+pub struct TokenEstimator;
+
+impl TokenEstimator {
+    /// Accurate Token Counting using tiktoken-rs (cl100k_base)
+    #[must_use]
+    pub fn estimate(prompt: &str, text: &str) -> TokenUsage {
+        let bpe = tiktoken_rs::cl100k_base().unwrap();
+        let prompt_tokens = bpe.encode_with_special_tokens(prompt).len();
+        let completion_tokens = bpe.encode_with_special_tokens(text).len();
+
+        TokenUsage {
+            prompt_tokens,
+            completion_tokens,
+            total_tokens: prompt_tokens + completion_tokens,
+        }
+    }
+}
+
 impl Telemetry {
     pub fn add_usage(&mut self, model_id: &str, usage: TokenUsage) {
         self.usage.prompt_tokens += usage.prompt_tokens;

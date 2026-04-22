@@ -8,6 +8,19 @@ pub use inspector::DialogueInspector;
 pub use orchestrator::AgentOrchestrator;
 pub use retry::{RetryPolicy, retry_with_backoff};
 
+use agent_kernel::{Result, StepOutcome, WorkflowContext};
+use std::sync::Arc;
+
+/// Strategy for multi-agent collaboration and orchestration.
+pub trait CollaborationStrategy: Send + Sync {
+    /// Executes a single iteration of the collaboration.
+    fn execute_iteration<'a>(
+        &'a self,
+        iteration: usize,
+        context: Arc<WorkflowContext>,
+    ) -> agent_kernel::BoxFuture<'a, Result<StepOutcome>>;
+}
+
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[must_use]

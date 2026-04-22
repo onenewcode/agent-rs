@@ -1,6 +1,6 @@
 use agent_kernel::{
-    Error, ErrorSource, ErrorType, OrErr, Result, RetryType, SearchProvider, SourceKind,
-    SourceMaterial, truncate_chars,
+    AgentError, ErrorType, OrErr, Result, RetryType, SearchProvider, SourceKind, SourceMaterial,
+    truncate_chars,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -44,31 +44,31 @@ impl TavilySearchProvider {
 
         let response = tokio::time::timeout(
             std::time::Duration::from_secs(30),
-            self.client
-                .post(&self.base_url)
-                .json(&request_body)
-                .send(),
+            self.client.post(&self.base_url).json(&request_body).send(),
         )
         .await
         .map_err(|_| {
-            Box::new(Error::explain(
+            AgentError::explain(
                 ErrorType::Timeout,
                 format!("search timed out for query `{query}`"),
-            ))
+            )
         })?
         .or_err(ErrorType::Network, "Tavily search request failed")?;
 
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_else(|_| "Unknown error".to_owned());
-            let mut err = Error::explain(
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_owned());
+            let mut err = AgentError::explain(
                 ErrorType::Provider,
                 format!("Tavily API error ({status}): {body}"),
             );
             if status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS {
                 err = err.set_retry(RetryType::Retry);
             }
-            return Err(Box::new(err.set_source(ErrorSource::Upstream)));
+            return Err(err);
         }
 
         let search_response: TavilySearchResponse = response

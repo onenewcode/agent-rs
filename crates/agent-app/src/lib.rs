@@ -1,6 +1,6 @@
 use agent_adapters::{FileArtifactStore, OpenRouterModel, ReqwestFetcher, TavilySearchProvider};
 use agent_kernel::{
-    ArtifactStore, DocumentParser, Error, ErrorType, OrErr, Result, RunReport, SearchProvider,
+    AgentError, ArtifactStore, DocumentParser, ErrorType, OrErr, Result, RunReport, SearchProvider,
     SourceFetcher,
 };
 use agent_runtime::AgentOrchestrator;
@@ -93,10 +93,10 @@ impl AppContainer {
                     config.services.search.base_url.clone(),
                 ))
             } else {
-                return Err(Box::new(Error::explain(
+                return Err(AgentError::explain(
                     ErrorType::Config,
-                    "Tavily API key is required for search".to_owned(),
-                )));
+                    "Tavily API key is required for search",
+                ));
             };
 
         let fetcher = Arc::new(ReqwestFetcher::new(http_client.clone()));

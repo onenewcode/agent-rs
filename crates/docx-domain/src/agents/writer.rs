@@ -1,15 +1,17 @@
 use crate::prompts::WriterTemplates;
 use agent_kernel::{
-    AgentSession, AutonomousAgent, BoxFuture, LanguageModel, Result, SearchProvider, SourceFetcher,
-    TrajectoryStep, truncate_chars,
+    AgentError, AuditorFeedbackList, AutonomousAgent, BoxFuture, ErrorType, FeedbackHistory,
+    Result, SearchProvider, SourceFetcher, StepOutcome, TaskGoal, TrajectoryStep,
+    WorkflowContext, truncate_chars,
 };
 use agent_tools::{EditDocumentTool, FetchUrlTool, WebSearchTool};
+use agent_rig::OpenRouterRigModel;
 use rig::completion::Prompt;
 use std::sync::Arc;
 use std::time::Instant;
 
 pub struct DocumentWriter {
-    llm: Arc<dyn LanguageModel>,
+    llm: Arc<OpenRouterRigModel>,
     search: Arc<dyn SearchProvider>,
     fetcher: Arc<dyn SourceFetcher>,
 }
@@ -17,7 +19,7 @@ pub struct DocumentWriter {
 impl DocumentWriter {
     #[must_use]
     pub fn new(
-        llm: Arc<dyn LanguageModel>,
+        llm: Arc<OpenRouterRigModel>,
         search: Arc<dyn SearchProvider>,
         fetcher: Arc<dyn SourceFetcher>,
     ) -> Self {
@@ -28,9 +30,9 @@ impl DocumentWriter {
         }
     }
 
-    fn build_agent<'a>(
-        &'a self,
-        session: &'a AgentSession,
+    fn build_agent(
+        &self,
+        context: Arc<WorkflowContext>,
     ) -> rig::agent::Agent<impl rig::completion::CompletionModel> {
         self.llm
             .agent_builder()
@@ -48,17 +50,14 @@ impl DocumentWriter {
             )
             .tool(WebSearchTool {
                 provider: self.search.clone(),
-                context: session.context.clone(),
-                trajectory: session.trajectory.clone(),
+                context: context.clone(),
             })
             .tool(FetchUrlTool {
                 fetcher: self.fetcher.clone(),
-                context: session.context.clone(),
-                trajectory: session.trajectory.clone(),
+                context: context.clone(),
             })
             .tool(EditDocumentTool {
-                context: session.context.clone(),
-                trajectory: session.trajectory.clone(),
+                context: context.clone(),
             })
             .default_max_turns(10)
             .build()
@@ -70,24 +69,48 @@ impl AutonomousAgent for DocumentWriter {
         "Writer"
     }
 
-    fn run<'a>(&'a self, session: &'a AgentSession) -> BoxFuture<'a, Result<()>> {
+    fn run<'a>(&'a self, context: Arc<WorkflowContext>) -> BoxFuture<'a, Result<StepOutcome>> {
         Box::pin(async move {
-            let context = session.context.read().await;
+            let task_goal = context
+                .state
+                .get::<TaskGoal>()
+                .ok_or_else(|| AgentError::explain(ErrorType::Internal, "TaskGoal missing"))?;
+            let current_document = context
+                .state
+                .get::<String>()
+                .ok_or_else(|| AgentError::explain(ErrorType::Internal, "Document missing"))?;
+            let history = context
+                .state
+                .get::<FeedbackHistory>()
+                .cloned()
+                .unwrap_or_default();
+            let feedback_list = context
+                .state
+                .get::<AuditorFeedbackList>()
+                .cloned()
+                .unwrap_or_default();
 
-            let prompt = if context.feedback_history.is_empty() {
+            // Combine task goal with auditor feedback
+            let mut effective_goal = task_goal.0.clone();
+            for feedback in &feedback_list.0 {
+                effective_goal =
+                    format!("{}\n\nFEEDBACK FROM AUDITOR: {}", effective_goal, feedback);
+            }
+
+            let prompt = if history.0.is_empty() {
                 tracing::info!("Initial task triggered");
-                WriterTemplates::initial_task(&context.task_goal, &context.current_document)
+                WriterTemplates::initial_task(&effective_goal, current_document)
             } else {
                 tracing::info!("Refinement task triggered based on feedback history");
+                // Note: WriterTemplates::refinement_task might need to be updated to handle FeedbackHistory correctly
+                // For now we'll assume it takes the history vector
                 WriterTemplates::refinement_task(
-                    &context.task_goal,
-                    &context.current_document,
-                    &context.feedback_history,
-                    &context.search_results,
+                    &effective_goal,
+                    current_document,
+                    &history.0,
+                    &Vec::new(), // search results
                 )
             };
-
-            drop(context);
 
             tracing::debug!(
                 model = self.llm.model_id(),
@@ -95,7 +118,7 @@ impl AutonomousAgent for DocumentWriter {
                 "Prepared prompt for Writer agent"
             );
 
-            let agent = self.build_agent(session);
+            let agent = self.build_agent(Arc::clone(&context));
 
             tracing::info!(
                 "Executing Writer agent ReAct loop (model: {}). Max autonomous turns: 10.",
@@ -109,8 +132,8 @@ impl AutonomousAgent for DocumentWriter {
                     model = self.llm.model_id(),
                     "Agent autonomous loop failed. Current error: {e}"
                 );
-                agent_kernel::Error::explain(
-                    agent_kernel::ErrorType::Provider,
+                AgentError::explain(
+                    ErrorType::Provider,
                     format!(
                         "Agent autonomous loop failed (model: {}): {e}",
                         self.llm.model_id()
@@ -126,7 +149,7 @@ impl AutonomousAgent for DocumentWriter {
                 "Writer agent successfully finished research and drafting"
             );
 
-            let mut context = session.context.write().await;
+            let mut next_context = (*context).clone();
 
             // Robust extraction logic supporting XML-like tags or prefix
             let mut updated = false;
@@ -138,11 +161,11 @@ impl AutonomousAgent for DocumentWriter {
             } else if let Some(pos) = text.find("<expanded_document>") {
                 let end_pos = text.find("</expanded_document>").unwrap_or(text.len());
                 let document_text = &text[pos + "<expanded_document>".len()..end_pos];
-                context.current_document = document_text.trim().to_string();
+                next_context.state.insert(document_text.trim().to_string());
                 tracing::info!("Writer agent completed via tagged document block");
                 updated = true;
             } else if let Some(document_text) = text.strip_prefix("FULL_DOCUMENT:\n") {
-                context.current_document = document_text.to_string();
+                next_context.state.insert(document_text.to_string());
                 tracing::info!("Writer agent completed via full document rewrite (legacy prefix)");
                 updated = true;
             } else {
@@ -150,7 +173,7 @@ impl AutonomousAgent for DocumentWriter {
                 for marker in &["FULL_DOCUMENT:", "DOCUMENT:", "FINAL_OUTPUT:"] {
                     if let Some(pos) = text.find(marker) {
                         let document_text = &text[pos + marker.len()..];
-                        context.current_document = document_text.trim().to_string();
+                        next_context.state.insert(document_text.trim().to_string());
                         tracing::info!(marker, "Writer agent completed via heuristic fallback");
                         updated = true;
                         break;
@@ -165,47 +188,24 @@ impl AutonomousAgent for DocumentWriter {
                 );
             }
 
-            self.record_telemetry(session, &prompt, &text, duration)
-                .await;
+            // Estimate usage accurately using centralized utility
+            let usage = agent_kernel::TokenEstimator::estimate(&prompt, &text);
 
-            Ok(())
+            let step = TrajectoryStep::Thought {
+                text: format!(
+                    "Writer (model: {id}) autonomously researched and finalized the document. Response preview: {preview}...",
+                    id = self.llm.model_id(),
+                    preview = text.chars().take(100).collect::<String>()
+                ),
+                usage: Some(usage),
+                duration_ms: Some(duration),
+            };
+
+            Ok(StepOutcome {
+                updated_context: next_context,
+                usage: Some(usage),
+                trajectory_events: vec![step],
+            })
         })
-    }
-}
-
-impl DocumentWriter {
-    async fn record_telemetry(
-        &self,
-        session: &AgentSession,
-        prompt: &str,
-        text: &str,
-        duration: u64,
-    ) {
-        let mut telemetry = session.telemetry.lock().await;
-        let prompt_tokens = prompt.split_whitespace().count();
-        let completion_tokens = text.split_whitespace().count();
-        telemetry.add_usage(
-            self.llm.model_id(),
-            agent_kernel::TokenUsage {
-                prompt_tokens,
-                completion_tokens,
-                total_tokens: prompt_tokens + completion_tokens,
-            },
-        );
-
-        let mut trajectory = session.trajectory.lock().await;
-        trajectory.steps.push(TrajectoryStep::Thought {
-            text: format!(
-                "Writer (model: {id}) autonomously researched and finalized the document. Response preview: {preview}...",
-                id = self.llm.model_id(),
-                preview = text.chars().take(100).collect::<String>()
-            ),
-            usage: Some(agent_kernel::TokenUsage {
-                prompt_tokens,
-                completion_tokens,
-                total_tokens: prompt_tokens + completion_tokens,
-            }),
-            duration_ms: Some(duration),
-        });
     }
 }

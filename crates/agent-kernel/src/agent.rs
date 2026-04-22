@@ -1,6 +1,6 @@
-use crate::{AgentTrajectory, SourceMaterial, Telemetry};
+use crate::telemetry::{TokenUsage, TrajectoryStep};
+use crate::typemap::TypeMap;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentFeedback {
@@ -25,31 +25,25 @@ pub struct AuditReport {
     pub convergence_issues: Vec<String>,
 }
 
+#[derive(Clone, Default)]
+pub struct WorkflowContext {
+    pub state: TypeMap,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AgentContext {
-    pub task_goal: String,
-    pub current_document: String,
-    pub search_results: Vec<SourceMaterial>,
-    pub feedback_history: Vec<AgentFeedback>,
-    pub audit_log: Vec<AuditVerdict>,
-}
+pub struct TaskGoal(pub String);
 
-impl AgentContext {
-    #[must_use]
-    pub fn new(task_goal: String, initial_doc: String) -> Self {
-        Self {
-            task_goal,
-            current_document: initial_doc,
-            search_results: Vec::new(),
-            feedback_history: Vec::new(),
-            audit_log: Vec::new(),
-        }
-    }
-}
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FeedbackHistory(pub Vec<AgentFeedback>);
 
-pub struct AgentSession {
-    pub session_id: String,
-    pub context: Arc<tokio::sync::RwLock<AgentContext>>,
-    pub telemetry: Arc<tokio::sync::Mutex<Telemetry>>,
-    pub trajectory: Arc<tokio::sync::Mutex<AgentTrajectory>>,
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AuditLog(pub Vec<AuditVerdict>);
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AuditorFeedbackList(pub Vec<String>);
+
+pub struct StepOutcome {
+    pub updated_context: WorkflowContext,
+    pub usage: Option<TokenUsage>,
+    pub trajectory_events: Vec<TrajectoryStep>,
 }

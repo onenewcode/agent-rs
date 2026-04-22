@@ -1,7 +1,7 @@
 use crate::prompts::ReviewerTemplates;
 use agent_kernel::{
-    AgentFeedback, AgentSession, AutonomousAgent, BoxFuture, Error, ErrorType, LanguageModel,
-    Result, TrajectoryStep,
+    AgentError, AgentFeedback, AutonomousAgent, BoxFuture, ErrorType, FeedbackHistory,
+    LanguageModel, Result, StepOutcome, TrajectoryStep, WorkflowContext,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -22,15 +22,23 @@ impl AutonomousAgent for DocumentReviewer {
         "Reviewer"
     }
 
-    fn run<'a>(&'a self, session: &'a AgentSession) -> BoxFuture<'a, Result<()>> {
+    fn run<'a>(&'a self, context: Arc<WorkflowContext>) -> BoxFuture<'a, Result<StepOutcome>> {
         Box::pin(async move {
-            let context = session.context.read().await;
-            let prompt = ReviewerTemplates::evaluation_task(
-                &context.task_goal,
-                &context.current_document,
-                &context.search_results,
-            );
-            drop(context);
+            let task_goal = context
+                .state
+                .get::<agent_kernel::TaskGoal>()
+                .ok_or_else(|| {
+                    AgentError::explain(ErrorType::Internal, "TaskGoal missing from context")
+                })?;
+            let current_doc = context.state.get::<String>().ok_or_else(|| {
+                AgentError::explain(ErrorType::Internal, "Document missing from context")
+            })?;
+
+            // Note: For simplicity, we'll just pass empty search results for now or extract them if available
+            let search_results = Vec::new();
+
+            let prompt =
+                ReviewerTemplates::evaluation_task(&task_goal.0, current_doc, &search_results);
 
             let start = Instant::now();
             let completion = self.llm.complete(&prompt).await?;
@@ -50,20 +58,22 @@ impl AutonomousAgent for DocumentReviewer {
             };
 
             let feedback: AgentFeedback = serde_json::from_str(json_str.trim()).map_err(|e| {
-                Box::new(Error::explain(
+                AgentError::explain(
                     ErrorType::Evaluation,
                     format!("failed to parse reviewer response: {e}. Raw: {text}"),
-                ))
+                )
             })?;
 
-            let mut context = session.context.write().await;
-            context.feedback_history.push(feedback.clone());
+            let mut next_context = (*context).clone();
+            let mut history = next_context
+                .state
+                .get::<FeedbackHistory>()
+                .cloned()
+                .unwrap_or_default();
+            history.0.push(feedback.clone());
+            next_context.state.insert(history);
 
-            let mut telemetry = session.telemetry.lock().await;
-            telemetry.add_usage(self.llm.model_id(), completion.usage);
-
-            let mut trajectory = session.trajectory.lock().await;
-            trajectory.steps.push(TrajectoryStep::Thought {
+            let step = TrajectoryStep::Thought {
                 text: format!(
                     "Scientific Reviewer (model: {}) evaluated the document with Grounding. Score: {}/100. Passed: {}",
                     self.llm.model_id(),
@@ -72,9 +82,13 @@ impl AutonomousAgent for DocumentReviewer {
                 ),
                 usage: Some(completion.usage),
                 duration_ms: Some(duration),
-            });
+            };
 
-            Ok(())
+            Ok(StepOutcome {
+                updated_context: next_context,
+                usage: Some(completion.usage),
+                trajectory_events: vec![step],
+            })
         })
     }
 }

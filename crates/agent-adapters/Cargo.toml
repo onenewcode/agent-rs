@@ -4,8 +4,8 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-agent-error.workspace = true
 agent-kernel = { path = "../agent-kernel" }
+agent-rig = { path = "../agent-rig" }
 reqwest.workspace = true
 rig.workspace = true
 scraper.workspace = true

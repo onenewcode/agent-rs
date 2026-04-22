@@ -1,0 +1,11 @@
+[package]
+name = "agent-rig"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+agent-kernel = { path = "../agent-kernel" }
+rig.workspace = true
+
+[lints]
+workspace = true

@@ -7,6 +7,7 @@ members = [
     "crates/docx-domain",
     "crates/agent-adapters", "crates/agent-tools",
     "crates/agent-error",
+    "crates/agent-rig",
 ]
 resolver = "2"
 

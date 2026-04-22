@@ -1,4 +1,4 @@
-use agent_kernel::{Error, Result};
+use agent_kernel::{AgentError, Result};
 use std::future::Future;
 use std::time::Duration;
 use tracing::warn;
@@ -26,7 +26,7 @@ pub async fn retry_with_backoff<T, F, Fut, C>(
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T>>,
-    C: Fn(&Error) -> bool,
+    C: Fn(&AgentError) -> bool,
 {
     let mut attempts = 0;
     loop {

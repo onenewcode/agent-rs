@@ -1,5 +1,5 @@
 use agent_kernel::{
-    Error, ErrorType, Result, SourceFetcher, SourceKind, SourceMaterial, truncate_chars,
+    AgentError, ErrorType, Result, SourceFetcher, SourceKind, SourceMaterial, truncate_chars,
 };
 use std::sync::Arc;
 
@@ -22,21 +22,20 @@ impl ReqwestFetcher {
         )
         .await
         .map_err(|_| {
-            Box::new(Error::explain(
+            AgentError::explain(
                 ErrorType::Timeout,
                 format!("fetching {url} via Jina timed out"),
-            ))
+            )
         })?;
 
         // If the request itself failed (e.g. DNS), we still return Err
         let response = match response {
             Ok(resp) => resp,
             Err(e) => {
-                return Err(Box::new(Error::because(
-                    e,
+                return Err(AgentError::explain(
                     ErrorType::Network,
-                    format!("failed to send request to Jina for {url}"),
-                )));
+                    format!("failed to send request to Jina for {url}: {e}"),
+                ));
             }
         };
 
@@ -60,11 +59,10 @@ impl ReqwestFetcher {
         let content = match response.text().await {
             Ok(text) => text,
             Err(e) => {
-                return Err(Box::new(Error::because(
-                    e,
+                return Err(AgentError::explain(
                     ErrorType::Network,
-                    format!("failed to read Jina response body for {url}"),
-                )));
+                    format!("failed to read Jina response body for {url}: {e}"),
+                ));
             }
         };
 

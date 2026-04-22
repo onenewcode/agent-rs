@@ -71,8 +71,30 @@ impl Error {
         }
     }
 
+    pub fn fatal(etype: ErrorType, context: impl Into<String>) -> Self {
+        Self::Base {
+            etype,
+            esource: ErrorSource::Internal,
+            retry: RetryType::Fatal,
+            context: context.into(),
+            cause: None,
+        }
+    }
+
+    pub fn retryable(etype: ErrorType, context: impl Into<String>) -> Self {
+        Self::Base {
+            etype,
+            esource: ErrorSource::Internal,
+            retry: RetryType::Retry,
+            context: context.into(),
+            cause: None,
+        }
+    }
+
     pub fn set_source(mut self, new_source: ErrorSource) -> Self {
-        let Self::Base { ref mut esource, .. } = self;
+        let Self::Base {
+            ref mut esource, ..
+        } = self;
         *esource = new_source;
         self
     }
@@ -92,24 +114,24 @@ impl Error {
 
 /// Extension trait for ergonomic error conversion.
 pub trait OrErr<T, E> {
-    fn or_err(self, etype: ErrorType, context: &str) -> Result<T>;
+    fn or_err(self, etype: ErrorType, context: &str) -> std::result::Result<T, Error>;
 }
 
 impl<T, E> OrErr<T, E> for std::result::Result<T, E>
 where
     E: Into<Box<dyn std::error::Error + Send + Sync + 'static>>,
 {
-    fn or_err(self, etype: ErrorType, context: &str) -> Result<T> {
-        self.map_err(|e| Box::new(Error::because(e, etype, context.to_string())))
+    fn or_err(self, etype: ErrorType, context: &str) -> std::result::Result<T, Error> {
+        self.map_err(|e| Error::because(e, etype, context.to_string()))
     }
 }
 
 pub trait OkOrErr<T> {
-    fn or_err(self, etype: ErrorType, context: &str) -> Result<T>;
+    fn or_err(self, etype: ErrorType, context: &str) -> std::result::Result<T, Error>;
 }
 
 impl<T> OkOrErr<T> for Option<T> {
-    fn or_err(self, etype: ErrorType, context: &str) -> Result<T> {
-        self.ok_or_else(|| Box::new(Error::explain(etype, context.to_string())))
+    fn or_err(self, etype: ErrorType, context: &str) -> std::result::Result<T, Error> {
+        self.ok_or_else(|| Error::explain(etype, context.to_string()))
     }
 }

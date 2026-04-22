@@ -1,4 +1,8 @@
-use agent_kernel::{AgentAuditor, AgentContext, AgentSession, AuditReport, AuditVerdict, BoxFuture, Result};
+use agent_kernel::{
+    AgentAuditor, AuditLog, AuditReport, AuditVerdict, BoxFuture, FeedbackHistory, Result,
+    StepOutcome, WorkflowContext,
+};
+use std::sync::Arc;
 
 pub struct DialogueInspector;
 
@@ -18,28 +22,29 @@ impl Default for DialogueInspector {
 impl AgentAuditor for DialogueInspector {
     fn audit_turn<'a>(
         &'a self,
-        session: &'a AgentSession,
-    ) -> BoxFuture<'a, Result<AuditVerdict>> {
+        context: Arc<WorkflowContext>,
+    ) -> BoxFuture<'a, Result<StepOutcome>> {
         Box::pin(async move {
-            let context = session.context.read().await;
-            
+            let history = context
+                .state
+                .get::<FeedbackHistory>()
+                .cloned()
+                .unwrap_or_default();
+
             let mut ignored_feedback = Vec::new();
             let mut is_stalled = false;
-            
-            // Heuristic for ignored feedback: 
-            // If the latest feedback has identical suggestions to the previous round, 
-            // the writer is likely ignoring the reviewer.
-            if context.feedback_history.len() >= 2 {
-                let current = &context.feedback_history[context.feedback_history.len() - 1];
-                let previous = &context.feedback_history[context.feedback_history.len() - 2];
-                
+
+            if history.0.len() >= 2 {
+                let current = &history.0[history.0.len() - 1];
+                let previous = &history.0[history.0.len() - 2];
+
                 for suggestion in &current.suggestions {
                     if previous.suggestions.contains(suggestion) {
                         ignored_feedback.push(suggestion.clone());
                     }
                 }
             }
-            
+
             if !ignored_feedback.is_empty() {
                 is_stalled = true;
             }
@@ -54,27 +59,46 @@ impl AgentAuditor for DialogueInspector {
                 None
             };
 
-            Ok(AuditVerdict {
+            let verdict = AuditVerdict {
                 is_stalled,
                 ignored_feedback,
                 suggestion_for_writer,
+            };
+
+            let mut next_context = (*context).clone();
+            let mut log = next_context
+                .state
+                .get::<AuditLog>()
+                .cloned()
+                .unwrap_or_default();
+            log.0.push(verdict);
+            next_context.state.insert(log);
+
+            Ok(StepOutcome {
+                updated_context: next_context,
+                usage: None,
+                trajectory_events: Vec::new(),
             })
         })
     }
 
-    fn generate_final_report(
-        &self,
-        context: &AgentContext,
-    ) -> AuditReport {
+    fn generate_final_report(&self, context: &WorkflowContext) -> AuditReport {
+        let history = context
+            .state
+            .get::<FeedbackHistory>()
+            .cloned()
+            .unwrap_or_default();
+        let audit_log = context.state.get::<AuditLog>().cloned().unwrap_or_default();
+
         let mut communication_efficiency = 1.0;
         let mut convergence_issues = Vec::new();
-        
-        let stall_count = context.audit_log.iter().filter(|v| v.is_stalled).count();
-        if !context.audit_log.is_empty() {
-            communication_efficiency = 1.0 - (stall_count as f32 / context.audit_log.len() as f32);
+
+        let stall_count = audit_log.0.iter().filter(|v| v.is_stalled).count();
+        if !audit_log.0.is_empty() {
+            communication_efficiency = 1.0 - (stall_count as f32 / audit_log.0.len() as f32);
         }
-        
-        for verdict in &context.audit_log {
+
+        for verdict in &audit_log.0 {
             for issue in &verdict.ignored_feedback {
                 if !convergence_issues.contains(issue) {
                     convergence_issues.push(issue.clone());
@@ -83,7 +107,7 @@ impl AgentAuditor for DialogueInspector {
         }
 
         AuditReport {
-            total_iterations: context.feedback_history.len(),
+            total_iterations: history.0.len(),
             communication_efficiency,
             convergence_issues,
         }

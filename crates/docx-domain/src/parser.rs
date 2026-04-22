@@ -1,6 +1,6 @@
 use crate::model::{BlockKind, Document, DocumentBlock};
 use agent_kernel::{
-    DocumentParser, Error, ErrorType, OkOrErr, OrErr, Result, normalize_whitespace,
+    AgentError, DocumentParser, ErrorType, OkOrErr, OrErr, Result, normalize_whitespace,
 };
 use std::fs::File;
 use std::path::Path;
@@ -56,10 +56,10 @@ impl DocxParser {
         }
 
         if blocks.is_empty() {
-            return Err(Box::new(Error::explain(
+            return Err(AgentError::explain(
                 ErrorType::Parse,
-                "document contains no text paragraphs".to_owned(),
-            )));
+                "document contains no text paragraphs",
+            ));
         }
 
         Ok(Document {
