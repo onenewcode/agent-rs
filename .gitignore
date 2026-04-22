@@ -40,3 +40,4 @@ venv/
 # Test data and temporary outputs
 test_data/
 *.expanded.docx
+\n# Worktrees\n.worktrees
