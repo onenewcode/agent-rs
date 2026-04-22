@@ -3,7 +3,7 @@ use agent_kernel::{
     AgentSession, AutonomousAgent, BoxFuture, LanguageModel, Result, SearchProvider, SourceFetcher,
     TrajectoryStep,
 };
-use agent_tools::{FetchUrlTool, WebSearchTool};
+use agent_tools::{EditDocumentTool, FetchUrlTool, WebSearchTool};
 use rig::completion::Prompt;
 use std::sync::Arc;
 use std::time::Instant;
@@ -38,19 +38,17 @@ impl AutonomousAgent for DocumentWriter {
         Box::pin(async move {
             let context = session.context.read().await;
 
-            let prompt = if let Some(feedback) = context.feedback_history.last() {
-                tracing::info!(
-                    "Refinement task triggered based on feedback score: {}/10",
-                    feedback.score
-                );
+            let prompt = if context.feedback_history.is_empty() {
+                tracing::info!("Initial task triggered");
+                WriterTemplates::initial_task(&context.task_goal, &context.current_document)
+            } else {
+                tracing::info!("Refinement task triggered based on feedback history");
                 WriterTemplates::refinement_task(
                     &context.task_goal,
                     &context.current_document,
-                    feedback,
+                    &context.feedback_history,
+                    &context.search_results,
                 )
-            } else {
-                tracing::info!("Initial task triggered");
-                WriterTemplates::initial_task(&context.task_goal, &context.current_document)
             };
 
             drop(context);
@@ -61,19 +59,20 @@ impl AutonomousAgent for DocumentWriter {
                 "Prepared prompt for Writer agent"
             );
 
-            // Initialize the Agent with autonomous tools and enough max_turns for complex research
             let agent = self
                 .llm
                 .agent_builder()
                 .preamble(
                     "You are an autonomous document research and writing agent. \
-                    You have access to tools to search the web and fetch specific URLs. \
+                    You have access to tools to search the web, fetch specific URLs, and edit the document surgically. \
                     \
                     CRITICAL INSTRUCTIONS:\n\
                     1. If you need more information, use `web_search` or `fetch_url` autonomously.\n\
                     2. If a tool returns an error (like 404), do not stop; use other search results or your internal knowledge to proceed.\n\
-                    3. Once you have gathered enough information, your FINAL response must be the COMPLETE expanded document text.\n\
-                    4. Do not output conversational filler. Output the document directly."
+                    3. To fix issues without rewriting everything, use `edit_document` to replace specific text segments. \n\
+                    4. If you used `edit_document`, your FINAL response can just be a confirmation like 'Done editing.' \n\
+                    5. If you do NOT use `edit_document` and choose to rewrite the whole text, your FINAL response must be the COMPLETE expanded document text.\n\
+                    6. Do not output conversational filler if outputting the full document."
                 )
                 .tool(WebSearchTool {
                     provider: self.search.clone(),
@@ -85,7 +84,11 @@ impl AutonomousAgent for DocumentWriter {
                     context: session.context.clone(),
                     trajectory: session.trajectory.clone(),
                 })
-                .default_max_turns(10) // Allow up to 10 rounds of tool usage
+                .tool(EditDocumentTool {
+                    context: session.context.clone(),
+                    trajectory: session.trajectory.clone(),
+                })
+                .default_max_turns(10)
                 .build();
 
             tracing::info!(
@@ -93,8 +96,6 @@ impl AutonomousAgent for DocumentWriter {
                 self.llm.model_id()
             );
 
-            // Run the agent. It will autonomously decide whether to call tools (search/fetch)
-            // in a ReAct loop before returning the final expanded document.
             let start = Instant::now();
             let text = agent.prompt(&prompt).await.map_err(|e| {
                 tracing::error!(
@@ -120,7 +121,12 @@ impl AutonomousAgent for DocumentWriter {
             );
 
             let mut context = session.context.write().await;
-            context.current_document.clone_from(&text);
+
+            // Only overwrite if the text is substantial enough to be a whole document
+            // otherwise, assume it was a tool-based surgical edit.
+            if text.len() > 100 && !text.to_lowercase().contains("done editing") {
+                context.current_document.clone_from(&text);
+            }
 
             self.record_telemetry(session, &prompt, &text, duration)
                 .await;

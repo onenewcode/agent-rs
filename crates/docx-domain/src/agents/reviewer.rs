@@ -35,10 +35,27 @@ impl AutonomousAgent for DocumentReviewer {
             #[allow(clippy::cast_possible_truncation)]
             let duration = duration as u64;
 
-            let feedback: AgentFeedback = serde_json::from_str(&completion.text).map_err(|e| {
+            let text = completion.text.trim();
+            let json_str = if let Some(start) = text.find("```json") {
+                if let Some(end) = text[start + 7..].find("```") {
+                    &text[start + 7..start + 7 + end]
+                } else {
+                    text
+                }
+            } else if let Some(start) = text.find("```") {
+                if let Some(end) = text[start + 3..].find("```") {
+                    &text[start + 3..start + 3 + end]
+                } else {
+                    text
+                }
+            } else {
+                text
+            };
+
+            let feedback: AgentFeedback = serde_json::from_str(json_str.trim()).map_err(|e| {
                 Box::new(Error::explain(
                     ErrorType::Evaluation,
-                    format!("failed to parse reviewer response: {e}"),
+                    format!("failed to parse reviewer response: {e}. Raw: {text}"),
                 ))
             })?;
 
