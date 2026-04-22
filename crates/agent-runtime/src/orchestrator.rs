@@ -1,7 +1,7 @@
 use crate::generate_run_id;
 use agent_kernel::{
-    AgentContext, AgentSession, AgentTrajectory, AutonomousAgent, Error, ErrorSource, ErrorType,
-    Result, RetryType, RunReport, Telemetry,
+    AgentAuditor, AgentContext, AgentSession, AgentTrajectory, AutonomousAgent, Error, ErrorSource,
+    ErrorType, Result, RetryType, RunReport, Telemetry,
 };
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
@@ -11,6 +11,7 @@ use crate::retry::{RetryPolicy, retry_with_backoff};
 pub struct AgentOrchestrator {
     writer: Arc<dyn AutonomousAgent>,
     reviewer: Arc<dyn AutonomousAgent>,
+    auditor: Arc<dyn AgentAuditor>,
     max_iterations: usize,
     retry_policy: RetryPolicy,
 }
@@ -19,11 +20,13 @@ impl AgentOrchestrator {
     pub fn new(
         writer: Arc<dyn AutonomousAgent>,
         reviewer: Arc<dyn AutonomousAgent>,
+        auditor: Arc<dyn AgentAuditor>,
         max_iterations: usize,
     ) -> Self {
         Self {
             writer,
             reviewer,
+            auditor,
             max_iterations,
             retry_policy: RetryPolicy::default(),
         }
@@ -83,10 +86,30 @@ impl AgentOrchestrator {
                     .set_retry(RetryType::Fatal))
             })?;
 
-            let ctx = context.read().await;
-            if ctx.feedback_history.last().is_some_and(|f| f.passed) {
-                tracing::info!("Reviewer passed the document. Collaboration complete.");
-                break;
+            // Audit the turn
+            let verdict = self.auditor.audit_turn(&session).await?;
+            let mut ctx = context.write().await;
+
+            // If the auditor suggested a correction, prepend it to the task goal for the next iteration
+            if let Some(ref correction) = verdict.suggestion_for_writer {
+                tracing::warn!(
+                    iteration,
+                    "Auditor detected communication stall: {}",
+                    correction
+                );
+                if !ctx.task_goal.contains("CRITICAL: You are ignoring") {
+                    ctx.task_goal = format!("{}\n\n{}", correction, ctx.task_goal);
+                }
+            }
+
+            ctx.audit_log.push(verdict);
+
+            if let Some(feedback) = ctx.feedback_history.last() {
+                if feedback.passed {
+                    let score = feedback.score;
+                    tracing::info!(score, "Reviewer passed the document. Collaboration complete.");
+                    break;
+                }
             }
         }
 
@@ -94,6 +117,13 @@ impl AgentOrchestrator {
         let final_doc = ctx.current_document.clone();
         let tel = *telemetry.lock().await;
         let traj = trajectory.lock().await.clone();
+
+        let audit_report = self.auditor.generate_final_report(&ctx);
+        tracing::info!(
+            efficiency = audit_report.communication_efficiency,
+            iterations = audit_report.total_iterations,
+            "Audit complete"
+        );
 
         let report = RunReport {
             run_id: session_id,

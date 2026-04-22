@@ -112,8 +112,10 @@ impl AppContainer {
             fetcher.clone(),
         ));
         let reviewer = Arc::new(DocumentReviewer::new(reviewer_model.clone()));
+        let auditor = Arc::new(agent_runtime::DialogueInspector::new());
 
-        let orchestrator = AgentOrchestrator::new(writer, reviewer, config.runtime.max_iterations);
+        let orchestrator =
+            AgentOrchestrator::new(writer, reviewer, auditor, config.runtime.max_iterations);
         let parser = DocxParser::new();
         let storage = Arc::new(FileArtifactStore::new(PathBuf::from(
             &config.services.artifacts.dir,

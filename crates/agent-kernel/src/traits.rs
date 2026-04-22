@@ -34,6 +34,18 @@ pub trait AutonomousAgent: Send + Sync {
     fn run<'a>(&'a self, session: &'a crate::agent::AgentSession) -> BoxFuture<'a, Result<()>>;
 }
 
+pub trait AgentAuditor: Send + Sync {
+    fn audit_turn<'a>(
+        &'a self,
+        session: &'a crate::agent::AgentSession,
+    ) -> BoxFuture<'a, Result<crate::agent::AuditVerdict>>;
+
+    fn generate_final_report(
+        &self,
+        context: &crate::agent::AgentContext,
+    ) -> crate::agent::AuditReport;
+}
+
 pub trait SourceFetcher: Send + Sync {
     fn fetch(&self, url: &str) -> BoxFuture<'_, Result<crate::SourceMaterial>>;
 }

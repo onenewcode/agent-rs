@@ -1,8 +1,10 @@
 #![allow(clippy::missing_errors_doc)]
 
+pub mod inspector;
 pub mod orchestrator;
 pub mod retry;
 
+pub use inspector::DialogueInspector;
 pub use orchestrator::AgentOrchestrator;
 pub use retry::{RetryPolicy, retry_with_backoff};
 

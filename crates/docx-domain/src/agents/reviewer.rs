@@ -25,8 +25,11 @@ impl AutonomousAgent for DocumentReviewer {
     fn run<'a>(&'a self, session: &'a AgentSession) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
             let context = session.context.read().await;
-            let prompt =
-                ReviewerTemplates::evaluation_task(&context.task_goal, &context.current_document);
+            let prompt = ReviewerTemplates::evaluation_task(
+                &context.task_goal,
+                &context.current_document,
+                &context.search_results,
+            );
             drop(context);
 
             let start = Instant::now();
@@ -36,15 +39,9 @@ impl AutonomousAgent for DocumentReviewer {
             let duration = duration as u64;
 
             let text = completion.text.trim();
-            let json_str = if let Some(start) = text.find("```json") {
-                if let Some(end) = text[start + 7..].find("```") {
-                    &text[start + 7..start + 7 + end]
-                } else {
-                    text
-                }
-            } else if let Some(start) = text.find("```") {
-                if let Some(end) = text[start + 3..].find("```") {
-                    &text[start + 3..start + 3 + end]
+            let json_str = if let Some(start) = text.find('{') {
+                if let Some(end) = text.rfind('}') {
+                    &text[start..=end]
                 } else {
                     text
                 }
@@ -68,7 +65,7 @@ impl AutonomousAgent for DocumentReviewer {
             let mut trajectory = session.trajectory.lock().await;
             trajectory.steps.push(TrajectoryStep::Thought {
                 text: format!(
-                    "Reviewer (model: {}) evaluated the document. Score: {}/10. Passed: {}",
+                    "Scientific Reviewer (model: {}) evaluated the document with Grounding. Score: {}/100. Passed: {}",
                     self.llm.model_id(),
                     feedback.score,
                     feedback.passed
