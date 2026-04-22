@@ -12,7 +12,7 @@ use tokio::sync::{Mutex, RwLock};
 
 /// Tool to edit a document by replacing old text with new text.
 pub struct EditDocumentTool {
-    pub current_content: Arc<RwLock<String>>,
+    pub context: Arc<RwLock<AgentContext>>,
     pub trajectory: Arc<Mutex<AgentTrajectory>>,
 }
 
@@ -47,16 +47,18 @@ impl Tool for EditDocumentTool {
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
         let start = Instant::now();
-        let mut content = self.current_content.write().await;
-        if !content.contains(&args.old_text) {
+        let mut context = self.context.write().await;
+        if !context.current_document.contains(&args.old_text) {
             return Err(Box::new(Error::explain(
                 ErrorType::Tool,
                 format!("could not find text to replace: `{}`", args.old_text),
             )));
         }
 
-        let new_content = content.replace(&args.old_text, &args.new_text);
-        *content = new_content;
+        let new_content = context
+            .current_document
+            .replacen(&args.old_text, &args.new_text, 1);
+        context.current_document = new_content;
 
         let duration = start.elapsed().as_millis();
         #[allow(clippy::cast_possible_truncation)]
@@ -74,7 +76,7 @@ impl Tool for EditDocumentTool {
 
         Ok(format!(
             "Successfully replaced text. New document length: {len} characters.",
-            len = content.len()
+            len = context.current_document.len()
         ))
     }
 }
@@ -207,5 +209,37 @@ impl Tool for FetchUrlTool {
             url = args.url,
             content = material.content.chars().take(1000).collect::<String>()
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_kernel::AgentContext;
+
+    #[tokio::test]
+    async fn test_edit_document_tool_replaces_only_first_occurrence() {
+        let context = Arc::new(RwLock::new(AgentContext {
+            task_goal: "test".to_string(),
+            current_document: "a b a c".to_string(),
+            search_results: Vec::new(),
+            feedback_history: Vec::new(),
+        }));
+        let trajectory = Arc::new(Mutex::new(AgentTrajectory::default()));
+        let tool = EditDocumentTool {
+            context: context.clone(),
+            trajectory,
+        };
+
+        let args = EditDocumentArgs {
+            old_text: "a".to_string(),
+            new_text: "X".to_string(),
+        };
+
+        let result = tool.call(args).await.unwrap();
+        assert!(result.contains("New document length: 7 characters."));
+
+        let final_doc = context.read().await.current_document.clone();
+        assert_eq!(final_doc, "X b a c");
     }
 }
